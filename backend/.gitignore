@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+loop_research.db
+.env

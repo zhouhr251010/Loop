@@ -1,0 +1,37 @@
+.env
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+backend/env/
+Loop/
+
+# Local databases and generated research data
+loop_research.db
+backend/loop_research.db
+*.sqlite
+*.sqlite3
+*.db
+
+# Node and Next.js
+node_modules/
+frontend/node_modules/
+frontend/npm-cache/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Logs and local OS/editor files
+*.log
+.DS_Store
+Thumbs.db
