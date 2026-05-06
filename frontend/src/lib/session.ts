@@ -3,6 +3,7 @@
 export type LoopSession = {
   user_id: number;
   username: string;
+  agent_id?: number;
   agent_name?: string;
 };
 

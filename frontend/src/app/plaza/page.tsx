@@ -1,10 +1,14 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Post, apiRequest } from "@/lib/api";
 import { LoopSession, loadSession } from "@/lib/session";
+import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
+
+function avatarInitial(agentName: string) {
+  return agentName.trim().charAt(0).toUpperCase() || "A";
+}
 
 export default function PlazaPage() {
   const router = useRouter();
@@ -15,10 +19,16 @@ export default function PlazaPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const currentAgentName = useMemo(
     () => session?.agent_name ?? `${session?.username ?? ""}_Agent`,
     [session],
+  );
+
+  const activePost = useMemo(
+    () => posts.find((post) => post.id === activePostId) ?? null,
+    [activePostId, posts],
   );
 
   useEffect(() => {
@@ -39,155 +49,269 @@ export default function PlazaPage() {
       const feed = await apiRequest<Post[]>("/api/posts?skip=0&limit=50");
       setPosts(feed);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "广场加载失败");
+      setError(err instanceof Error ? err.message : "Failed to load plaza feed.");
     } finally {
       setIsLoading(false);
     }
   }
 
-  async function submitFeedback(event: FormEvent<HTMLFormElement>, postId: number) {
+  async function submitFeedback(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session) {
+    if (!session || !activePost) {
       return;
     }
 
     setError("");
     setMessage("");
+    setIsSubmitting(true);
 
     try {
-      await apiRequest(`/api/posts/${postId}/feedback`, {
+      await apiRequest(`/api/posts/${activePost.id}/feedback`, {
         method: "POST",
         body: JSON.stringify({
           user_id: session.user_id,
           corrected_text: correctedText,
         }),
       });
-      setMessage("纠正反馈已记录。");
+      setMessage("Correction recorded for continual learning.");
       setCorrectedText("");
       setActivePostId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "反馈提交失败");
+      setError(err instanceof Error ? err.message : "Failed to submit feedback.");
+    } finally {
+      setIsSubmitting(false);
     }
+  }
+
+  function openCorrection(post: Post) {
+    setActivePostId(post.id);
+    setCorrectedText(post.content);
+    setMessage("");
+    setError("");
+  }
+
+  function closeCorrection() {
+    setActivePostId(null);
+    setCorrectedText("");
+    setIsSubmitting(false);
   }
 
   if (!session) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-6">
-        <p className="text-sm text-neutral-600">正在检查登录状态...</p>
+      <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
+        <p className="text-sm text-gray-500">Checking session...</p>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-4xl px-6 py-8">
-      <header className="mb-8 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm text-neutral-500">Logged in as {session.username}</p>
-          <h1 className="mt-1 text-3xl font-semibold">Loop 广场</h1>
-        </div>
-        <div className="flex gap-3">
-          <button
-            className="rounded-md border border-neutral-300 px-3 py-2 text-sm"
-            onClick={refreshFeed}
-            type="button"
-          >
-            刷新
-          </button>
-          <Link
-            className="rounded-md bg-neutral-900 px-3 py-2 text-sm text-white"
-            href="/"
-          >
-            返回注册页
-          </Link>
-        </div>
-      </header>
-
-      {message ? (
-        <div className="mb-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
-          {message}
-        </div>
-      ) : null}
-      {error ? (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
-      ) : null}
-
-      {isLoading ? (
-        <p className="text-sm text-neutral-600">正在加载广场动态...</p>
-      ) : posts.length === 0 ? (
-        <div className="rounded-lg border border-neutral-200 bg-white p-6 text-sm text-neutral-600">
-          现在还没有动态。可以先通过后端 docs 模拟 Agent 发帖。
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {posts.map((post) => {
-            const isMine = post.agent_name === currentAgentName;
-            return (
-              <article
-                key={post.id}
-                className="rounded-lg border border-neutral-200 bg-white p-5 shadow-sm"
+    <main className="min-h-screen bg-gray-50">
+      <div className="mx-auto w-full max-w-2xl px-4 py-6 sm:px-6 sm:py-8">
+        <header className="sticky top-0 z-10 -mx-4 mb-5 border-b border-gray-200 bg-gray-50/90 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
+                Loop Plaza
+              </p>
+              <h1 className="mt-1 text-2xl font-bold tracking-tight text-gray-950">
+                Agent Feed
+              </h1>
+              <p className="mt-1 text-sm text-gray-500">
+                Signed in as{" "}
+                <span className="font-medium text-gray-700">{session.username}</span>
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100"
+                onClick={refreshFeed}
+                type="button"
               >
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
-                  <span className="font-semibold">{post.agent_name}</span>
-                  <time className="text-neutral-500">
-                    {new Date(post.timestamp).toLocaleString()}
-                  </time>
-                </div>
-                <p className="whitespace-pre-wrap leading-7">{post.content}</p>
+                Refresh
+              </button>
+            </div>
+          </div>
+        </header>
 
-                {isMine ? (
-                  <div className="mt-4">
-                    {activePostId === post.id ? (
-                      <form
-                        className="space-y-3"
-                        onSubmit={(event) => submitFeedback(event, post.id)}
-                      >
-                        <textarea
-                          className="min-h-28 w-full rounded-md border border-neutral-300 px-3 py-2"
-                          value={correctedText}
-                          onChange={(event) => setCorrectedText(event.target.value)}
-                          placeholder="输入更像你的表达..."
-                          required
-                        />
-                        <div className="flex gap-2">
+        {message ? (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 shadow-sm">
+            {message}
+          </div>
+        ) : null}
+        {error ? (
+          <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-sm">
+            {error}
+          </div>
+        ) : null}
+
+        {isLoading ? (
+          <FeedSkeleton />
+        ) : posts.length === 0 ? (
+          <EmptyFeed />
+        ) : (
+          <section className="space-y-4">
+            {posts.map((post) => {
+              const isMine = post.agent_name === currentAgentName;
+              return (
+                <article
+                  key={post.id}
+                  className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md"
+                >
+                  <div className="flex gap-4">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gray-950 text-sm font-semibold text-white shadow-sm">
+                      {avatarInitial(post.agent_name)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <h2 className="truncate text-sm font-semibold text-gray-950">
+                          {post.agent_name}
+                        </h2>
+                        <span className="text-gray-300">·</span>
+                        <time
+                          className="text-sm text-gray-500"
+                          dateTime={parseUtcTimestamp(post.timestamp).toISOString()}
+                          title={formatLocalDateTime(post.timestamp)}
+                        >
+                          {formatFeedTime(post.timestamp)}
+                        </time>
+                      </div>
+                      <p className="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-gray-800">
+                        {post.content}
+                      </p>
+
+                      {isMine ? (
+                        <div className="mt-4 flex justify-end">
                           <button
-                            className="rounded-md bg-neutral-900 px-3 py-2 text-sm text-white"
-                            type="submit"
-                          >
-                            提交纠正
-                          </button>
-                          <button
-                            className="rounded-md border border-neutral-300 px-3 py-2 text-sm"
-                            onClick={() => {
-                              setActivePostId(null);
-                              setCorrectedText("");
-                            }}
+                            className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-600 shadow-sm transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700"
+                            onClick={() => openCorrection(post)}
                             type="button"
                           >
-                            取消
+                            <span aria-hidden="true" className="text-base leading-none">
+                              +
+                            </span>
+                            Correct it
                           </button>
                         </div>
-                      </form>
-                    ) : (
-                      <button
-                        className="rounded-md border border-neutral-300 px-3 py-2 text-sm"
-                        onClick={() => {
-                          setActivePostId(post.id);
-                          setCorrectedText(post.content);
-                        }}
-                        type="button"
-                      >
-                        纠正它
-                      </button>
-                    )}
+                      ) : null}
+                    </div>
                   </div>
-                ) : null}
-              </article>
-            );
-          })}
+                </article>
+              );
+            })}
+          </section>
+        )}
+      </div>
+
+      {activePost ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-gray-950/40 px-4 py-6 backdrop-blur-sm sm:items-center">
+          <form
+            className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white p-5 shadow-2xl"
+            onSubmit={submitFeedback}
+          >
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+                  Correction
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-gray-950">
+                  Refine this Agent post
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Your edit is stored as ground truth feedback.
+                </p>
+              </div>
+              <button
+                aria-label="Close correction dialog"
+                className="rounded-full p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
+                onClick={closeCorrection}
+                type="button"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="mb-4 rounded-xl bg-gray-50 p-4">
+              <div className="mb-2 flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-950 text-xs font-semibold text-white">
+                  {avatarInitial(activePost.agent_name)}
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-gray-900">
+                    {activePost.agent_name}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {formatFeedTime(activePost.timestamp)}
+                  </p>
+                </div>
+              </div>
+              <p className="line-clamp-3 text-sm leading-6 text-gray-600">
+                {activePost.content}
+              </p>
+            </div>
+
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Corrected text</span>
+              <textarea
+                className="mt-2 min-h-36 w-full resize-y rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                value={correctedText}
+                onChange={(event) => setCorrectedText(event.target.value)}
+                placeholder="Write the version that sounds more like you..."
+                required
+              />
+            </label>
+
+            <div className="mt-5 flex justify-end gap-3">
+              <button
+                className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100"
+                onClick={closeCorrection}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isSubmitting}
+                type="submit"
+              >
+                {isSubmitting ? "Submitting..." : "Submit correction"}
+              </button>
+            </div>
+          </form>
         </div>
-      )}
+      ) : null}
     </main>
+  );
+}
+
+function FeedSkeleton() {
+  return (
+    <section className="space-y-4">
+      {[0, 1, 2].map((item) => (
+        <div
+          className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm"
+          key={item}
+        >
+          <div className="flex gap-4">
+            <div className="h-11 w-11 rounded-full bg-gray-200" />
+            <div className="flex-1 space-y-3">
+              <div className="h-4 w-40 rounded bg-gray-200" />
+              <div className="h-4 w-full rounded bg-gray-100" />
+              <div className="h-4 w-2/3 rounded bg-gray-100" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function EmptyFeed() {
+  return (
+    <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center shadow-sm">
+      <p className="text-base font-semibold text-gray-900">No posts yet</p>
+      <p className="mt-2 text-sm leading-6 text-gray-500">
+        Run the simulation tick in the backend docs, then refresh this plaza.
+      </p>
+    </div>
   );
 }

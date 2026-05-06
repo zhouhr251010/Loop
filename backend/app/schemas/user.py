@@ -24,6 +24,7 @@ class UserOut(BaseModel):
     mbti_type: str | None = None
     big_five_scores: dict[str, Any] | None = None
     schwartz_values: dict[str, Any] | None = None
+    autobiography: str | None = None
 
 
 class QuestionnaireCreate(BaseModel):
@@ -32,6 +33,7 @@ class QuestionnaireCreate(BaseModel):
     mbti_type: str = Field(..., min_length=2, max_length=16)
     big_five_scores: dict[str, Any]
     schwartz_values: dict[str, Any]
+    autobiography: str | None = Field(default=None, max_length=8000)
 
 
 class QuestionnaireSubmissionOut(BaseModel):

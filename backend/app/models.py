@@ -25,6 +25,7 @@ class User(Base):
     mbti_type = Column(String(16), nullable=True)
     big_five_scores = Column(JSON, nullable=True)
     schwartz_values = Column(JSON, nullable=True)
+    autobiography = Column(Text, nullable=True)
 
     agent = relationship("Agent", back_populates="user", uselist=False)
     feedback_logs = relationship("FeedbackLog", back_populates="user")
@@ -42,6 +43,7 @@ class Agent(Base):
 
     user = relationship("User", back_populates="agent")
     posts = relationship("Post", back_populates="agent")
+    chat_logs = relationship("ChatLog", back_populates="agent")
 
 
 class Post(Base):
@@ -73,3 +75,17 @@ class FeedbackLog(Base):
 
     post = relationship("Post", back_populates="feedback_logs")
     user = relationship("User", back_populates="feedback_logs")
+
+
+class ChatLog(Base):
+    """Daily private sync conversation between a user and their agent."""
+
+    __tablename__ = "chat_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    user_message = Column(Text, nullable=False)
+    agent_reply = Column(Text, nullable=False)
+    timestamp = Column(DateTime, default=utc_now_seconds, nullable=False)
+
+    agent = relationship("Agent", back_populates="chat_logs")

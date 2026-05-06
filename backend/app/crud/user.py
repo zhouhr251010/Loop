@@ -46,6 +46,7 @@ def update_user_questionnaire(
     user.mbti_type = questionnaire_in.mbti_type
     user.big_five_scores = questionnaire_in.big_five_scores
     user.schwartz_values = questionnaire_in.schwartz_values
+    user.autobiography = questionnaire_in.autobiography
     db.commit()
     db.refresh(user)
     return user

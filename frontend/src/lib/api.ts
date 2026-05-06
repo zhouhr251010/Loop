@@ -7,6 +7,7 @@ export type User = {
   mbti_type?: string | null;
   big_five_scores?: Record<string, number> | null;
   schwartz_values?: Record<string, number> | null;
+  autobiography?: string | null;
 };
 
 export type Agent = {
@@ -24,6 +25,23 @@ export type Post = {
   timestamp: string;
 };
 
+export type ChatReply = {
+  reply: string;
+  memory_chunks_used: number;
+  chat_log: {
+    id: number;
+    agent_id: number;
+    user_message: string;
+    agent_reply: string;
+    timestamp: string;
+  };
+};
+
+export type MemoryUploadResponse = {
+  message: string;
+  chunks_added: number;
+};
+
 export async function apiRequest<T>(
   path: string,
   init?: RequestInit,
@@ -37,7 +55,20 @@ export async function apiRequest<T>(
   });
 
   if (!response.ok) {
-    const message = await response.text();
+    const rawMessage = await response.text();
+    let message = rawMessage;
+
+    try {
+      const parsed = JSON.parse(rawMessage) as { detail?: unknown };
+      if (typeof parsed.detail === "string") {
+        message = parsed.detail;
+      } else if (parsed.detail) {
+        message = JSON.stringify(parsed.detail);
+      }
+    } catch {
+      message = rawMessage;
+    }
+
     throw new Error(message || `Request failed with ${response.status}`);
   }
 

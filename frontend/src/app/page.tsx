@@ -43,6 +43,7 @@ export default function OnboardingPage() {
   const [schwartzValues, setSchwartzValues] = useState(
     initialScores(schwartzFields),
   );
+  const [autobiography, setAutobiography] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -59,7 +60,7 @@ export default function OnboardingPage() {
       setUser(createdUser);
       saveSession({ user_id: createdUser.id, username: createdUser.username });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "注册失败");
+      setError(err instanceof Error ? err.message : "Registration failed.");
     } finally {
       setIsSubmitting(false);
     }
@@ -83,115 +84,136 @@ export default function OnboardingPage() {
             mbti_type: mbtiType.toUpperCase(),
             big_five_scores: bigFiveScores,
             schwartz_values: schwartzValues,
+            autobiography,
           }),
         },
       );
       saveSession({
         user_id: result.user.id,
         username: result.user.username,
+        agent_id: result.agent.id,
         agent_name: result.agent.agent_name,
       });
       router.push("/plaza");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "问卷提交失败");
+      setError(err instanceof Error ? err.message : "Questionnaire submission failed.");
     } finally {
       setIsSubmitting(false);
     }
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center px-6 py-10">
-      <div className="mb-8">
-        <p className="text-sm font-medium uppercase tracking-wide text-neutral-500">
-          Loop Research Platform
-        </p>
-        <h1 className="mt-2 text-3xl font-semibold">志愿者注册与问卷</h1>
-      </div>
-
-      {error ? (
-        <div className="mb-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+    <main className="min-h-screen bg-gray-50 px-4 py-10 sm:px-6">
+      <div className="mx-auto w-full max-w-3xl">
+        <div className="mb-8">
+          <p className="text-sm font-medium uppercase tracking-wide text-gray-500">
+            Loop Research Platform
+          </p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-gray-950">
+            Participant onboarding
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-gray-600">
+            Register, describe your identity core, and generate your digital Agent.
+          </p>
         </div>
-      ) : null}
 
-      {!user ? (
-        <form
-          onSubmit={handleRegister}
-          className="space-y-4 rounded-lg border border-neutral-200 bg-white p-6 shadow-sm"
-        >
-          <label className="block">
-            <span className="text-sm font-medium">Username</span>
-            <input
-              className="mt-2 w-full rounded-md border border-neutral-300 px-3 py-2"
-              minLength={3}
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              required
-            />
-          </label>
-          <label className="block">
-            <span className="text-sm font-medium">Password</span>
-            <input
-              className="mt-2 w-full rounded-md border border-neutral-300 px-3 py-2"
-              minLength={8}
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-          </label>
-          <button
-            className="rounded-md bg-neutral-900 px-4 py-2 text-white disabled:opacity-60"
-            disabled={isSubmitting}
-            type="submit"
+        {error ? (
+          <div className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        ) : null}
+
+        {!user ? (
+          <form
+            onSubmit={handleRegister}
+            className="space-y-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
           >
-            {isSubmitting ? "提交中..." : "注册并继续"}
-          </button>
-        </form>
-      ) : (
-        <form
-          onSubmit={handleQuestionnaire}
-          className="space-y-6 rounded-lg border border-neutral-200 bg-white p-6 shadow-sm"
-        >
-          <label className="block">
-            <span className="text-sm font-medium">MBTI</span>
-            <input
-              className="mt-2 w-full rounded-md border border-neutral-300 px-3 py-2 uppercase"
-              maxLength={16}
-              value={mbtiType}
-              onChange={(event) => setMbtiType(event.target.value)}
-              placeholder="INTJ"
-              required
-            />
-          </label>
-
-          <ScoreGroup
-            title="Big Five"
-            fields={bigFiveFields}
-            values={bigFiveScores}
-            onChange={(key, value) =>
-              setBigFiveScores((current) => ({ ...current, [key]: value }))
-            }
-          />
-
-          <ScoreGroup
-            title="Schwartz Values"
-            fields={schwartzFields}
-            values={schwartzValues}
-            onChange={(key, value) =>
-              setSchwartzValues((current) => ({ ...current, [key]: value }))
-            }
-          />
-
-          <button
-            className="rounded-md bg-neutral-900 px-4 py-2 text-white disabled:opacity-60"
-            disabled={isSubmitting}
-            type="submit"
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Username</span>
+              <input
+                className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                minLength={3}
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                required
+              />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Password</span>
+              <input
+                className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                minLength={8}
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </label>
+            <button
+              className="rounded-full bg-gray-950 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:opacity-60"
+              disabled={isSubmitting}
+              type="submit"
+            >
+              {isSubmitting ? "Submitting..." : "Register and continue"}
+            </button>
+          </form>
+        ) : (
+          <form
+            onSubmit={handleQuestionnaire}
+            className="space-y-7 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
           >
-            {isSubmitting ? "生成中..." : "生成我的 Agent"}
-          </button>
-        </form>
-      )}
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">MBTI</span>
+              <input
+                className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 uppercase outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                maxLength={16}
+                value={mbtiType}
+                onChange={(event) => setMbtiType(event.target.value)}
+                placeholder="INTJ"
+                required
+              />
+            </label>
+
+            <ScoreGroup
+              title="Big Five"
+              fields={bigFiveFields}
+              values={bigFiveScores}
+              onChange={(key, value) =>
+                setBigFiveScores((current) => ({ ...current, [key]: value }))
+              }
+            />
+
+            <ScoreGroup
+              title="Schwartz Values"
+              fields={schwartzFields}
+              values={schwartzValues}
+              onChange={(key, value) =>
+                setSchwartzValues((current) => ({ ...current, [key]: value }))
+              }
+            />
+
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">
+                Digital autobiography / core values
+              </span>
+              <textarea
+                className="mt-2 min-h-40 w-full resize-y rounded-xl border border-gray-200 px-4 py-3 text-sm leading-6 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                value={autobiography}
+                onChange={(event) => setAutobiography(event.target.value)}
+                placeholder="Write your digital autobiography / core values. This will become the soul tone of your Agent."
+              />
+            </label>
+
+            <button
+              className="rounded-full bg-gray-950 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:opacity-60"
+              disabled={isSubmitting}
+              type="submit"
+            >
+              {isSubmitting ? "Generating..." : "Generate my Agent"}
+            </button>
+          </form>
+        )}
+      </div>
     </main>
   );
 }
@@ -209,16 +231,16 @@ function ScoreGroup({
 }) {
   return (
     <section>
-      <h2 className="mb-3 text-lg font-semibold">{title}</h2>
+      <h2 className="mb-4 text-lg font-semibold text-gray-950">{title}</h2>
       <div className="space-y-4">
         {fields.map(([key, label]) => (
-          <label key={key} className="block">
+          <label key={key} className="block rounded-xl bg-gray-50 p-4">
             <div className="mb-2 flex items-center justify-between text-sm">
-              <span>{label}</span>
-              <span className="font-mono">{values[key]}</span>
+              <span className="font-medium text-gray-700">{label}</span>
+              <span className="font-mono text-gray-500">{values[key]}</span>
             </div>
             <input
-              className="w-full accent-neutral-900"
+              className="w-full accent-gray-950"
               max={100}
               min={0}
               type="range"

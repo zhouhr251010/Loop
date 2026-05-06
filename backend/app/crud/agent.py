@@ -29,6 +29,7 @@ def build_system_prompt_base(user: models.User) -> str:
         "mbti_type": user.mbti_type,
         "big_five_scores": user.big_five_scores,
         "schwartz_values": user.schwartz_values,
+        "autobiography": user.autobiography,
     }
     profile_json = json.dumps(profile, ensure_ascii=False, sort_keys=True)
     return (

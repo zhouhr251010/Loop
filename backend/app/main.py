@@ -7,14 +7,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import models  # noqa: F401
-from .database import Base, engine
-from .routers import posts, simulate, users
+from .database import Base, engine, ensure_sqlite_schema
+from .routers import chat, memory, posts, simulate, users
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create local SQLite tables when the API starts."""
     Base.metadata.create_all(bind=engine)
+    ensure_sqlite_schema()
     yield
 
 
@@ -30,6 +31,8 @@ app.add_middleware(
 
 app.include_router(posts.router)
 app.include_router(simulate.router)
+app.include_router(chat.router)
+app.include_router(memory.router)
 app.include_router(users.router)
 
 

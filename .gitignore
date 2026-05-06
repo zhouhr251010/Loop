@@ -18,6 +18,7 @@ Loop/
 # Local databases and generated research data
 loop_research.db
 backend/loop_research.db
+chroma_db/
 *.sqlite
 *.sqlite3
 *.db
