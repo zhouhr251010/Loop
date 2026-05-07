@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 from app.crud import agent as agent_crud
 from app.crud import chat as chat_crud
 from app.database import get_db
+from app import models
 from app.schemas.chat import ChatMessageCreate, ChatReplyOut
+from app.security import get_current_user
 from app.services.llm_service import chat_with_agent
 
 
@@ -22,6 +24,7 @@ def chat_with_agent_endpoint(
     agent_id: int,
     chat_in: ChatMessageCreate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ) -> ChatReplyOut:
     """Send a private sync message to an agent and store the chat turn."""
     db_agent = agent_crud.get_agent(db, agent_id)
@@ -29,6 +32,11 @@ def chat_with_agent_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found.",
+        )
+    if db_agent.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only chat with your own agent.",
         )
 
     agent_reply, memory_chunks_used = chat_with_agent(db_agent, chat_in.message)

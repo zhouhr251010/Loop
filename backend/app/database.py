@@ -38,6 +38,8 @@ def ensure_sqlite_schema() -> None:
         return
 
     user_columns = {column["name"] for column in inspector.get_columns("users")}
-    if "autobiography" not in user_columns:
-        with engine.begin() as connection:
+    with engine.begin() as connection:
+        if "autobiography" not in user_columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN autobiography TEXT"))
+        if "core_memory" not in user_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN core_memory JSON"))

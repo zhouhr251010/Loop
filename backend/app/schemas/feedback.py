@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class FeedbackCreate(BaseModel):
     """Incoming payload for correcting an agent-generated post."""
 
-    user_id: int
-    corrected_text: str = Field(..., min_length=1)
+    user_id: int | None = None
+    corrected_text: str = Field(..., min_length=1, max_length=4000)
 
 
 class FeedbackLogOut(BaseModel):

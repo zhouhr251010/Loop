@@ -1,6 +1,8 @@
 """Local RAG service for user-scoped digital memories."""
 
 from functools import lru_cache
+import logging
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -10,10 +12,19 @@ from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CHROMA_PATH = PROJECT_ROOT / "chroma_db"
-COLLECTION_NAME = "loop_user_memories"
-MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+COLLECTION_NAME = "loop_memories_bge_v1"
+MODEL_NAME = "BAAI/bge-large-zh-v1.5"
+EMBEDDING_DIMENSIONS = 1024
+RERANKER_MODEL_NAME = "BAAI/bge-reranker-large"
+EMBEDDING_DEVICE_ENV = "LOOP_EMBEDDING_DEVICE"
+RERANKER_DEVICE_ENV = "LOOP_RERANKER_DEVICE"
 MAX_CHUNK_CHARS = 300
+RECALL_TOP_K = 15
 FALLBACK_SCAN_LIMIT = 50
+MIN_MEMORY_RESULTS = 2
+BGE_QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
+
+logger = logging.getLogger(__name__)
 
 
 def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
@@ -63,12 +74,63 @@ def _get_embedding_model() -> Any:
             "sentence-transformers is not installed or could not be imported.",
         ) from exc
 
+    device = _get_embedding_device()
     try:
-        return SentenceTransformer(MODEL_NAME)
+        return SentenceTransformer(MODEL_NAME, device=device)
     except Exception as exc:
+        logger.warning(
+            "Failed to load embedding model '%s' on %s: %s",
+            MODEL_NAME,
+            device,
+            exc,
+        )
+        if device != "cpu" and not os.getenv(EMBEDDING_DEVICE_ENV):
+            try:
+                logger.warning("Retrying embedding model '%s' on CPU.", MODEL_NAME)
+                return SentenceTransformer(MODEL_NAME, device="cpu")
+            except Exception as cpu_exc:
+                logger.warning(
+                    "Failed to load embedding model '%s' on CPU: %s",
+                    MODEL_NAME,
+                    cpu_exc,
+                )
         raise RuntimeError(
             f"Failed to load local embedding model '{MODEL_NAME}'.",
         ) from exc
+
+
+def _get_embedding_device() -> str:
+    """Choose the embedding device, preferring CUDA when available."""
+    configured_device = os.getenv(EMBEDDING_DEVICE_ENV)
+    if configured_device:
+        return configured_device
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except Exception:
+        pass
+
+    return "cpu"
+
+
+def _get_reranker_device() -> str:
+    """Choose the reranker device, spreading large models across GPUs by default."""
+    configured_device = os.getenv(RERANKER_DEVICE_ENV)
+    if configured_device:
+        return configured_device
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0"
+    except Exception:
+        pass
+
+    return "cpu"
 
 
 @lru_cache(maxsize=1)
@@ -81,9 +143,51 @@ def _get_collection() -> Any:
 
     try:
         client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        return client.get_or_create_collection(name=COLLECTION_NAME)
+        return client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={
+                "embedding_model": MODEL_NAME,
+                "embedding_dimensions": EMBEDDING_DIMENSIONS,
+                "reranker_model": RERANKER_MODEL_NAME,
+                "retrieval_pipeline": "vector_recall_cross_encoder_rerank",
+            },
+        )
     except Exception as exc:
         raise RuntimeError("Failed to initialize the local ChromaDB store.") from exc
+
+
+@lru_cache(maxsize=1)
+def _get_reranker() -> Any | None:
+    """Load the BGE cross-encoder reranker, falling back cleanly if unavailable."""
+    try:
+        from sentence_transformers import CrossEncoder
+    except Exception as exc:
+        logger.warning("sentence-transformers CrossEncoder import failed: %s", exc)
+        return None
+
+    device = _get_reranker_device()
+    try:
+        return CrossEncoder(RERANKER_MODEL_NAME, device=device, max_length=512)
+    except Exception as exc:
+        logger.warning(
+            "Failed to load reranker '%s' on %s: %s",
+            RERANKER_MODEL_NAME,
+            device,
+            exc,
+        )
+        if device == "cpu" or os.getenv(RERANKER_DEVICE_ENV):
+            return None
+
+    try:
+        logger.warning("Retrying reranker '%s' on CPU.", RERANKER_MODEL_NAME)
+        return CrossEncoder(RERANKER_MODEL_NAME, device="cpu", max_length=512)
+    except Exception as exc:
+        logger.warning(
+            "Failed to load reranker '%s' on CPU: %s",
+            RERANKER_MODEL_NAME,
+            exc,
+        )
+        return None
 
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:
@@ -91,6 +195,11 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     model = _get_embedding_model()
     embeddings = model.encode(texts, normalize_embeddings=True)
     return embeddings.tolist()
+
+
+def _embed_query(query: str) -> list[float]:
+    """Embed a retrieval query with the BGE Chinese retrieval instruction."""
+    return _embed_texts([f"{BGE_QUERY_INSTRUCTION}{query}"])[0]
 
 
 def _read_user_documents_from_sqlite(user_id: int, limit: int) -> list[str]:
@@ -156,6 +265,40 @@ def _rank_documents(query: str, documents: list[str], top_k: int) -> list[str]:
     return [document for _, _, document in ranked[:top_k]]
 
 
+def _dedupe_documents(documents: list[str]) -> list[str]:
+    """Keep first occurrences while removing empty or duplicate chunks."""
+    unique_documents: list[str] = []
+    seen: set[str] = set()
+    for document in documents:
+        normalized_document = document.strip()
+        if not normalized_document or normalized_document in seen:
+            continue
+        seen.add(normalized_document)
+        unique_documents.append(normalized_document)
+    return unique_documents
+
+
+def _rerank_documents(query: str, documents: list[str], top_k: int) -> list[str]:
+    """Rerank recalled chunks with a BGE cross-encoder."""
+    reranker = _get_reranker()
+    if reranker is None:
+        return documents[:top_k]
+
+    pairs = [[query, document] for document in documents]
+    try:
+        scores = reranker.predict(pairs)
+    except Exception as exc:
+        logger.warning("BGE reranker prediction failed: %s", exc)
+        return documents[:top_k]
+
+    scored_documents = [
+        (float(score), index, document)
+        for index, (score, document) in enumerate(zip(scores, documents))
+    ]
+    scored_documents.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    return [document for _, _, document in scored_documents[:top_k]]
+
+
 def add_memory(user_id: int, text: str) -> int:
     """Chunk and store user memory text in the local Chroma vector store."""
     chunks = _chunk_text(text)
@@ -179,36 +322,167 @@ def add_memory(user_id: int, text: str) -> int:
     return len(chunks)
 
 
+def add_scored_memories(
+    user_id: int,
+    agent_id: int,
+    memories: list[dict[str, Any]],
+) -> int:
+    """Store scored episodic memories while preserving SOTA ranking metadata."""
+    documents: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+
+    for memory in memories:
+        text = str(memory.get("text") or "").strip()
+        if not text:
+            continue
+
+        similarity = max(0.0, min(1.0, float(memory.get("similarity", 0.5))))
+        importance = max(0.0, min(1.0, float(memory.get("importance", 0.5))))
+        time_decay = max(0.0, min(1.0, float(memory.get("time_decay", 0.0))))
+        score = similarity * 0.5 + importance * 0.3 - time_decay * 0.2
+        if score <= 0:
+            continue
+
+        chunks = _chunk_text(text)
+        for chunk_index, chunk in enumerate(chunks):
+            documents.append(chunk)
+            metadatas.append(
+                {
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "source": "sleep_consolidation",
+                    "memory_layer": "episodic",
+                    "similarity": similarity,
+                    "importance": importance,
+                    "time_decay": time_decay,
+                    "score": score,
+                    "chunk_index": chunk_index,
+                    "embedding_model": MODEL_NAME,
+                },
+            )
+
+    if not documents:
+        return 0
+
+    collection = _get_collection()
+    embeddings = _embed_texts(documents)
+    ids = [f"user-{user_id}-episodic-{uuid4()}" for _ in documents]
+    collection.add(
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+    return len(documents)
+
+
+def add_agent_chat_memories(
+    user_id: int,
+    target_agent_id: int,
+    messages: list[dict[str, Any]],
+) -> int:
+    """Store group-chat memory from one target agent's private perspective."""
+    documents: list[str] = []
+    metadatas: list[dict[str, Any]] = []
+
+    for message in messages:
+        sender_agent_id = int(message["sender_agent_id"])
+        content = str(message["content"]).strip()
+        if not content:
+            continue
+
+        speaker = "me" if sender_agent_id == target_agent_id else "others"
+        timestamp = str(message.get("timestamp") or "").strip()
+        speaker_label = "我" if speaker == "me" else f"Agent #{sender_agent_id}"
+        timestamp_prefix = f"[{timestamp}] " if timestamp else ""
+        memory_text = f"{timestamp_prefix}{speaker_label}: {content}"
+
+        chunks = _chunk_text(memory_text)
+        for chunk_index, chunk in enumerate(chunks):
+            metadata: dict[str, Any] = {
+                "user_id": user_id,
+                "agent_id": target_agent_id,
+                "target_agent_id": target_agent_id,
+                "source": "group_chat_import",
+                "speaker": speaker,
+                "sender_agent_id": sender_agent_id,
+                "embedding_model": MODEL_NAME,
+                "chunk_index": chunk_index,
+            }
+            if timestamp:
+                metadata["timestamp"] = timestamp
+            if speaker == "others":
+                metadata["original_speaker_id"] = sender_agent_id
+
+            documents.append(chunk)
+            metadatas.append(metadata)
+
+    if not documents:
+        return 0
+
+    collection = _get_collection()
+    embeddings = _embed_texts(documents)
+    ids = [f"agent-{target_agent_id}-group-chat-{uuid4()}" for _ in documents]
+
+    collection.add(
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metadatas,
+    )
+    return len(documents)
+
+
 def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
-    """Retrieve relevant memory chunks for a user-scoped query."""
+    """Retrieve relevant memory chunks with two-stage Advanced RAG."""
     clean_query = query.strip()
-    if not clean_query or top_k <= 0:
+    if top_k <= 0:
         return []
 
-    retrieved: list[str] = []
-    try:
-        collection = _get_collection()
-        query_embedding = _embed_texts([clean_query])[0]
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            where={"user_id": user_id},
-        )
-        documents = results.get("documents") or []
-        if documents:
-            retrieved.extend(document for document in documents[0] if document)
-    except Exception:
-        retrieved = []
+    recalled_documents: list[str] = []
+    if clean_query:
+        try:
+            collection = _get_collection()
+            query_embedding = _embed_query(clean_query)
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=max(RECALL_TOP_K, top_k),
+                where={"user_id": user_id},
+            )
+            documents = results.get("documents") or []
+            if documents:
+                recalled_documents.extend(documents[0])
+        except Exception as exc:
+            logger.warning("BGE vector recall failed: %s", exc)
+            recalled_documents = []
 
-    fallback_documents = _read_user_documents_from_sqlite(
-        user_id,
-        limit=max(FALLBACK_SCAN_LIMIT, top_k),
+    recalled_documents = _dedupe_documents(recalled_documents)
+    retrieved = (
+        _rerank_documents(clean_query, recalled_documents, top_k)
+        if clean_query and recalled_documents
+        else recalled_documents[:top_k]
     )
+
+    fallback_limit = max(FALLBACK_SCAN_LIMIT, top_k, MIN_MEMORY_RESULTS)
+    try:
+        fallback_documents = _read_user_documents_from_sqlite(
+            user_id,
+            limit=fallback_limit,
+        )
+    except Exception as exc:
+        logger.warning("SQLite memory fallback read failed: %s", exc)
+        fallback_documents = []
     if fallback_documents:
-        retrieved.extend(_rank_documents(clean_query, fallback_documents, top_k))
+        ranked_documents = (
+            _rank_documents(clean_query, fallback_documents, top_k)
+            if clean_query
+            else fallback_documents[:top_k]
+        )
+        retrieved.extend(ranked_documents)
 
     unique_documents: list[str] = []
     seen: set[str] = set()
+    target_count = min(top_k, max(MIN_MEMORY_RESULTS, 1))
     for document in retrieved:
         if document in seen:
             continue
@@ -217,4 +491,69 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
         if len(unique_documents) >= top_k:
             break
 
+    if len(unique_documents) < target_count:
+        for document in fallback_documents:
+            if document in seen:
+                continue
+            seen.add(document)
+            unique_documents.append(document)
+            if len(unique_documents) >= target_count or len(unique_documents) >= top_k:
+                break
+
     return unique_documents
+
+
+def retrieve_hybrid_memory(
+    user_id: int,
+    query: str,
+    top_k: int = 3,
+) -> list[str]:
+    """Retrieve vector memories plus graph social context from SQL."""
+    memories = retrieve_memory(user_id=user_id, query=query, top_k=top_k)
+    try:
+        from app import models
+        from app.database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            source_agent = (
+                db.query(models.Agent)
+                .filter(models.Agent.user_id == user_id)
+                .first()
+            )
+            if source_agent is None:
+                return memories
+            relationships = (
+                db.query(models.Relationship)
+                .filter(models.Relationship.agent_id_1 == source_agent.id)
+                .order_by(models.Relationship.affinity_score.desc())
+                .limit(8)
+                .all()
+            )
+            if not relationships:
+                return memories
+
+            graph_lines: list[str] = []
+            for relationship in relationships:
+                target_agent = (
+                    db.query(models.Agent)
+                    .filter(models.Agent.id == relationship.agent_id_2)
+                    .first()
+                )
+                target_name = (
+                    target_agent.agent_name
+                    if target_agent is not None
+                    else f"Agent #{relationship.agent_id_2}"
+                )
+                graph_lines.append(
+                    f"{target_name}: affinity_score={relationship.affinity_score:.2f}",
+                )
+            return [
+                *memories,
+                "【GraphRAG 社交图谱上下文】\n" + "\n".join(graph_lines),
+            ]
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Hybrid graph retrieval failed: %s", exc)
+        return memories

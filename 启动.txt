@@ -1,0 +1,18 @@
+1. 在你的个人电脑终端开 SSH 隧道
+ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@172.31.111.13
+
+2. 在服务器终端启动后端
+cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend
+conda activate Loop
+uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+
+
+3. 在服务器另一个终端启动前端
+cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/frontend
+npm run dev -- --hostname 127.0.0.1 --port 3000
+
+4. 在你的个人电脑浏览器打开
+http://localhost:3000
+
+后端文档也可以通过隧道访问：
+http://localhost:8001/docs

@@ -2,7 +2,17 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 
 from .database import Base
@@ -26,6 +36,15 @@ class User(Base):
     big_five_scores = Column(JSON, nullable=True)
     schwartz_values = Column(JSON, nullable=True)
     autobiography = Column(Text, nullable=True)
+    core_memory = Column(
+        JSON,
+        default=lambda: {
+            "persona_traits": "",
+            "key_relationships": "",
+            "current_goals": "",
+        },
+        nullable=True,
+    )
 
     agent = relationship("Agent", back_populates="user", uselist=False)
     feedback_logs = relationship("FeedbackLog", back_populates="user")
@@ -44,6 +63,46 @@ class Agent(Base):
     user = relationship("User", back_populates="agent")
     posts = relationship("Post", back_populates="agent")
     chat_logs = relationship("ChatLog", back_populates="agent")
+    relationships_from = relationship(
+        "Relationship",
+        back_populates="source_agent",
+        foreign_keys="Relationship.agent_id_1",
+    )
+    relationships_to = relationship(
+        "Relationship",
+        back_populates="target_agent",
+        foreign_keys="Relationship.agent_id_2",
+    )
+    reflection_events = relationship("ReflectionEvent", back_populates="agent")
+
+
+class Relationship(Base):
+    """Directed social affinity between two virtual agents."""
+
+    __tablename__ = "relationships"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id_1",
+            "agent_id_2",
+            name="uq_relationship_agent_pair",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id_1 = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    agent_id_2 = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    affinity_score = Column(Float, default=0.0, nullable=False)
+
+    source_agent = relationship(
+        "Agent",
+        back_populates="relationships_from",
+        foreign_keys=[agent_id_1],
+    )
+    target_agent = relationship(
+        "Agent",
+        back_populates="relationships_to",
+        foreign_keys=[agent_id_2],
+    )
 
 
 class Post(Base):
@@ -89,3 +148,19 @@ class ChatLog(Base):
     timestamp = Column(DateTime, default=utc_now_seconds, nullable=False)
 
     agent = relationship("Agent", back_populates="chat_logs")
+
+
+class ReflectionEvent(Base):
+    """Layered reflection tree node derived during sleep consolidation."""
+
+    __tablename__ = "reflection_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    level = Column(String(32), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    source_record_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=utc_now_seconds, nullable=False, index=True)
+    reflected_at = Column(DateTime, nullable=True, index=True)
+
+    agent = relationship("Agent", back_populates="reflection_events")

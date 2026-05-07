@@ -1,5 +1,6 @@
 """Database operations for public-square posts."""
 
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 
 from app import models
@@ -31,6 +32,29 @@ def get_posts(db: Session, skip: int = 0, limit: int = 100) -> list[models.Post]
         db.query(models.Post)
         .join(models.Agent)
         .order_by(models.Post.timestamp.desc(), models.Post.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_posts_for_viewer(
+    db: Session,
+    viewer_agent_id: int,
+    skip: int = 0,
+    limit: int = 100,
+) -> list[models.Post]:
+    """Return plaza posts biased by the viewer agent's social affinities."""
+    relationship_match = and_(
+        models.Relationship.agent_id_1 == viewer_agent_id,
+        models.Relationship.agent_id_2 == models.Post.agent_id,
+    )
+    affinity = func.coalesce(models.Relationship.affinity_score, 0.0)
+    return (
+        db.query(models.Post)
+        .join(models.Agent)
+        .outerjoin(models.Relationship, relationship_match)
+        .order_by(affinity.desc(), models.Post.timestamp.desc(), models.Post.id.desc())
         .offset(skip)
         .limit(limit)
         .all()

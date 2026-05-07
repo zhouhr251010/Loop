@@ -6,7 +6,9 @@ import { usePathname } from "next/navigation";
 const navItems = [
   { href: "/plaza", label: "Loop Plaza", icon: "🌍" },
   { href: "/chat", label: "Nightly Sync", icon: "💬" },
+  { href: "/import", label: "Chat Import", icon: "IO" },
   { href: "/memory", label: "记忆金库 (Memory Vault)", icon: "🧠" },
+  { href: "/lab", label: "Lab Console", icon: "Lab" },
 ];
 
 export function NavBar() {

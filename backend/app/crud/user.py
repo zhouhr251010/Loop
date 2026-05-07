@@ -1,13 +1,13 @@
 """Database operations for users and questionnaire profiles."""
 
-from passlib.context import CryptContext
+import bcrypt
+
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
 from app.schemas.user import QuestionnaireCreate, UserCreate
-
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from app.services.core_memory_service import DEFAULT_CORE_MEMORY
 
 
 def get_user(db: Session, user_id: int) -> models.User | None:
@@ -17,12 +17,28 @@ def get_user(db: Session, user_id: int) -> models.User | None:
 
 def get_user_by_username(db: Session, username: str) -> models.User | None:
     """Return a user by username."""
-    return db.query(models.User).filter(models.User.username == username).first()
+    return (
+        db.query(models.User)
+        .filter(func.lower(models.User.username) == username.lower())
+        .first()
+    )
 
 
 def hash_password(password: str) -> str:
     """Hash a plain-text password before persistence."""
-    return pwd_context.hash(password)
+    password_bytes = password.encode("utf-8")
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """Return whether a plain-text password matches the stored hash."""
+    try:
+        return bcrypt.checkpw(
+            password.encode("utf-8"),
+            password_hash.encode("utf-8"),
+        )
+    except ValueError:
+        return False
 
 
 def create_user(db: Session, user_in: UserCreate) -> models.User:
@@ -30,6 +46,7 @@ def create_user(db: Session, user_in: UserCreate) -> models.User:
     db_user = models.User(
         username=user_in.username,
         password_hash=hash_password(user_in.password),
+        core_memory=DEFAULT_CORE_MEMORY.copy(),
     )
     db.add(db_user)
     db.commit()

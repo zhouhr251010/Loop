@@ -8,6 +8,7 @@ from app.crud import post as post_crud
 from app.database import get_db
 from app.models import Agent
 from app.schemas.post import PostCreate, PostOut
+from app.security import require_admin_key
 from app.services.llm_service import generate_agent_post
 
 
@@ -29,6 +30,7 @@ def _simulate_agent_post(db: Session, agent: Agent) -> PostOut:
 def simulate_single_agent_post(
     agent_id: int,
     db: Session = Depends(get_db),
+    _admin_key: None = Depends(require_admin_key),
 ) -> PostOut:
     """Generate a post for one agent from its owner's identity-core data."""
     db_agent = agent_crud.get_agent(db, agent_id)
@@ -46,7 +48,10 @@ def simulate_single_agent_post(
     response_model=list[PostOut],
     status_code=status.HTTP_201_CREATED,
 )
-def simulate_tick(db: Session = Depends(get_db)) -> list[PostOut]:
+def simulate_tick(
+    db: Session = Depends(get_db),
+    _admin_key: None = Depends(require_admin_key),
+) -> list[PostOut]:
     """Advance the simulation clock by asking every agent to publish one post."""
     agents = agent_crud.get_agents(db)
     return [_simulate_agent_post(db, agent) for agent in agents]

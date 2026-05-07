@@ -3,6 +3,8 @@
 export type LoopSession = {
   user_id: number;
   username: string;
+  access_token: string;
+  token_expires_at?: number;
   agent_id?: number;
   agent_name?: string;
 };
@@ -20,11 +22,24 @@ export function loadSession(): LoopSession | null {
   }
 
   try {
-    return JSON.parse(raw) as LoopSession;
+    const session = JSON.parse(raw) as LoopSession;
+    if (!session.access_token) {
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    if (session.token_expires_at && Date.now() >= session.token_expires_at) {
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return session;
   } catch {
     localStorage.removeItem(SESSION_KEY);
     return null;
   }
+}
+
+export function getAccessToken(): string | null {
+  return loadSession()?.access_token ?? null;
 }
 
 export function clearSession() {

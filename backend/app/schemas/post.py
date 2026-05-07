@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class PostCreate(BaseModel):
     """Incoming payload for creating an agent post."""
 
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=4000)
 
 
 class PostOut(BaseModel):

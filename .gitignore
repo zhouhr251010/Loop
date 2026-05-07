@@ -1,4 +1,6 @@
 .env
+.env.local
+.env.*.local
 
 # Python caches and virtual environments
 __pycache__/

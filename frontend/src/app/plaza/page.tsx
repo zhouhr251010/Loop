@@ -2,8 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Post, apiRequest } from "@/lib/api";
-import { LoopSession, loadSession } from "@/lib/session";
+import { Agent, Post, apiRequest } from "@/lib/api";
+import { LoopSession, clearSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
 
 function avatarInitial(agentName: string) {
@@ -16,9 +16,11 @@ export default function PlazaPage() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [activePostId, setActivePostId] = useState<number | null>(null);
   const [correctedText, setCorrectedText] = useState("");
+  const [postDraft, setPostDraft] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isPublishing, setIsPublishing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const currentAgentName = useMemo(
@@ -32,18 +34,39 @@ export default function PlazaPage() {
   );
 
   useEffect(() => {
-    const storedSession = loadSession();
-    if (!storedSession) {
-      router.replace("/");
-      return;
+    async function bootstrap() {
+      const storedSession = loadSession();
+      if (!storedSession) {
+        router.replace("/");
+        return;
+      }
+
+      try {
+        const agent = await apiRequest<Agent>(
+          `/api/users/${storedSession.user_id}/agent`,
+        );
+        const hydratedSession = {
+          ...storedSession,
+          agent_id: agent.id,
+          agent_name: agent.agent_name,
+        };
+        saveSession(hydratedSession);
+        setSession(hydratedSession);
+      } catch {
+        setSession(storedSession);
+        setError("No matching Agent found. Please complete onboarding or switch user.");
+      } finally {
+        await refreshFeed(false);
+      }
     }
 
-    setSession(storedSession);
-    refreshFeed();
+    bootstrap();
   }, [router]);
 
-  async function refreshFeed() {
-    setError("");
+  async function refreshFeed(clearExistingError = true) {
+    if (clearExistingError) {
+      setError("");
+    }
     setIsLoading(true);
     try {
       const feed = await apiRequest<Post[]>("/api/posts?skip=0&limit=50");
@@ -52,6 +75,82 @@ export default function PlazaPage() {
       setError(err instanceof Error ? err.message : "Failed to load plaza feed.");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function submitPost(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session?.agent_id || !postDraft.trim()) {
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setIsPublishing(true);
+
+    const publishContent = postDraft.trim();
+
+    try {
+      const createdPost = await apiRequest<Omit<Post, "agent_name">>(
+        `/api/agents/${session.agent_id}/posts`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            content: publishContent,
+          }),
+        },
+      );
+      setPosts((currentPosts) => [
+        {
+          ...createdPost,
+          agent_name: currentAgentName,
+        },
+        ...currentPosts,
+      ]);
+      setPostDraft("");
+      setMessage("Post published to the plaza.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to publish post.";
+      if (message === "You can only create posts for your own agent.") {
+        try {
+          const agent = await apiRequest<Agent>(`/api/users/${session.user_id}/agent`);
+          const hydratedSession = {
+            ...session,
+            agent_id: agent.id,
+            agent_name: agent.agent_name,
+          };
+          const createdPost = await apiRequest<Omit<Post, "agent_name">>(
+            `/api/agents/${agent.id}/posts`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                content: publishContent,
+              }),
+            },
+          );
+          saveSession(hydratedSession);
+          setSession(hydratedSession);
+          setPosts((currentPosts) => [
+            {
+              ...createdPost,
+              agent_name: agent.agent_name,
+            },
+            ...currentPosts,
+          ]);
+          setPostDraft("");
+          setMessage("Post published to the plaza.");
+          return;
+        } catch (retryErr) {
+          setError(
+            retryErr instanceof Error ? retryErr.message : "Failed to publish post.",
+          );
+          return;
+        }
+      }
+
+      setError(message);
+    } finally {
+      setIsPublishing(false);
     }
   }
 
@@ -69,7 +168,6 @@ export default function PlazaPage() {
       await apiRequest(`/api/posts/${activePost.id}/feedback`, {
         method: "POST",
         body: JSON.stringify({
-          user_id: session.user_id,
           corrected_text: correctedText,
         }),
       });
@@ -96,6 +194,12 @@ export default function PlazaPage() {
     setIsSubmitting(false);
   }
 
+  function switchUser() {
+    clearSession();
+    setSession(null);
+    router.push("/");
+  }
+
   if (!session) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
@@ -119,15 +223,26 @@ export default function PlazaPage() {
               <p className="mt-1 text-sm text-gray-500">
                 Signed in as{" "}
                 <span className="font-medium text-gray-700">{session.username}</span>
+                <span className="text-gray-300"> · </span>
+                <span className="font-medium text-gray-700">
+                  {session.agent_id ? `Agent #${session.agent_id}` : "No Agent yet"}
+                </span>
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100"
-                onClick={refreshFeed}
+                onClick={() => refreshFeed()}
                 type="button"
               >
                 Refresh
+              </button>
+              <button
+                className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100"
+                onClick={switchUser}
+                type="button"
+              >
+                Switch user
               </button>
             </div>
           </div>
@@ -143,6 +258,54 @@ export default function PlazaPage() {
             {error}
           </div>
         ) : null}
+
+        <form
+          className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm"
+          onSubmit={submitPost}
+        >
+          <div className="flex gap-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-gray-950 text-sm font-semibold text-white shadow-sm">
+              {avatarInitial(currentAgentName)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-gray-950">
+                    {currentAgentName}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Posting as your Agent
+                  </p>
+                </div>
+                <span className="text-xs text-gray-400">
+                  {postDraft.length}/4000
+                </span>
+              </div>
+              <textarea
+                className="mt-3 min-h-28 w-full resize-y rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-[15px] leading-7 text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-300 focus:bg-white focus:ring-4 focus:ring-indigo-100"
+                disabled={!session.agent_id || isPublishing}
+                maxLength={4000}
+                onChange={(event) => setPostDraft(event.target.value)}
+                placeholder="Write anything you want to share in the plaza..."
+                value={postDraft}
+              />
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-gray-500">
+                  {session.agent_id
+                    ? "This will appear in the public plaza feed."
+                    : "Finish the questionnaire first to create your Agent."}
+                </p>
+                <button
+                  className="rounded-full bg-gray-950 px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!session.agent_id || isPublishing || !postDraft.trim()}
+                  type="submit"
+                >
+                  {isPublishing ? "Publishing..." : "Post"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </form>
 
         {isLoading ? (
           <FeedSkeleton />
