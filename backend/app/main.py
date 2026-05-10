@@ -1,5 +1,6 @@
 """FastAPI application entry point for the Loop research platform."""
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,12 +19,29 @@ from .security import (
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
 )
+from .services.rag_service import warm_up_rag_models
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 DEFAULT_CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 DEFAULT_ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+)
+for noisy_logger_name in (
+    "httpx",
+    "httpcore",
+    "huggingface_hub",
+    "huggingface_hub.utils._http",
+    "sentence_transformers",
+    "sentence_transformers.base.model",
+    "transformers",
+    "urllib3",
+):
+    logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
 
 def get_cors_origins() -> list[str]:
@@ -53,6 +71,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create local SQLite tables when the API starts."""
     Base.metadata.create_all(bind=engine)
     ensure_sqlite_schema()
+    try:
+        warm_up_rag_models()
+    except Exception as exc:
+        print(
+            (
+                "[Loop RAG] startup warmup skipped: "
+                f"{exc.__class__.__name__}: {exc}"
+            ),
+            flush=True,
+        )
     yield
 
 

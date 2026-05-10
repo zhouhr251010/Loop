@@ -4,6 +4,7 @@ import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Agent,
+  AgentSessionChoice,
   ChatImportResponse,
   ImportedChatMessage,
   apiRequest,
@@ -66,10 +67,13 @@ function ChatImportView() {
   const [rawMessages, setRawMessages] = useState<RawChatMessage[]>([]);
   const [skippedRows, setSkippedRows] = useState(0);
   const [senderMap, setSenderMap] = useState<Record<string, string>>({});
+  const [adminKey, setAdminKey] = useState("");
+  const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [result, setResult] = useState<ChatImportResponse | null>(null);
   const [error, setError] = useState("");
   const [isParsing, setIsParsing] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
 
   useEffect(() => {
     async function bootstrap() {
@@ -80,9 +84,7 @@ function ChatImportView() {
       }
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${storedSession.user_id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         const hydratedSession = {
           ...storedSession,
           agent_id: agent.id,
@@ -127,6 +129,20 @@ function ChatImportView() {
       return Number.isInteger(mappedAgentId) && mappedAgentId > 0;
     });
 
+  const agentLabelById = useMemo(() => {
+    const labels = new Map<number, string>();
+    if (session?.agent_id) {
+      labels.set(
+        session.agent_id,
+        `@${session.username} · ${session.agent_name ?? "current Agent"}`,
+      );
+    }
+    for (const choice of agentChoices) {
+      labels.set(choice.agent.id, `@${choice.user.username} · ${choice.agent.agent_name}`);
+    }
+    return labels;
+  }, [agentChoices, session]);
+
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     setError("");
@@ -155,7 +171,12 @@ function ChatImportView() {
         Object.fromEntries(
           Array.from(new Set(parsed.messages.map((message) => message.sender_id)))
             .sort()
-            .map((senderId) => [senderId, ""]),
+            .map((senderId) => [
+              senderId,
+              session?.agent_id && senderId === session.username
+                ? String(session.agent_id)
+                : "",
+            ]),
         ),
       );
     } catch (err) {
@@ -177,7 +198,7 @@ function ChatImportView() {
     setIsImporting(true);
     try {
       const response = await apiRequest<ChatImportResponse>(
-        `/api/agents/${session.agent_id}/import_chat`,
+        "/api/agents/me/import_chat",
         {
           method: "POST",
           body: JSON.stringify({ messages: mappedMessages }),
@@ -188,6 +209,32 @@ function ChatImportView() {
       setError(err instanceof Error ? err.message : "Failed to import group chat.");
     } finally {
       setIsImporting(false);
+    }
+  }
+
+  async function loadAgentChoices() {
+    const trimmedAdminKey = adminKey.trim();
+    if (!trimmedAdminKey) {
+      setError("Admin key is required to load the Agent dropdown.");
+      return;
+    }
+
+    setError("");
+    setIsLoadingAgents(true);
+    try {
+      const choices = await apiRequest<AgentSessionChoice[]>(
+        "/api/users/agent-choices",
+        {
+          headers: {
+            "X-Loop-Admin-Key": trimmedAdminKey,
+          },
+        },
+      );
+      setAgentChoices(choices);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load agents.");
+    } finally {
+      setIsLoadingAgents(false);
     }
   }
 
@@ -210,20 +257,15 @@ function ChatImportView() {
             群聊历史导入
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-500">
-            将外部群聊 sender_id 对齐到 Loop Agent ID，并从当前 Agent 的第一人称视角写入初始化记忆。
+            将外部群聊 sender_id 对齐到 Loop Agent，并从当前 Agent 的第一人称视角写入初始化记忆。
           </p>
           <p className="mt-2 text-sm text-gray-400">
-            User #{session.user_id} ·{" "}
-            <span className="font-medium text-gray-600">{session.username}</span>
+            Importing as{" "}
+            <span className="font-medium text-gray-600">@{session.username}</span>
             {" · "}
-            {session.agent_id ? (
-              <span className="font-medium text-gray-600">
-                Agent #{session.agent_id}
-                {session.agent_name ? ` · ${session.agent_name}` : ""}
-              </span>
-            ) : (
-              <span>No Agent yet</span>
-            )}
+            <span className="font-medium text-gray-600">
+              {session.agent_name ?? "No Agent yet"}
+            </span>
           </p>
         </header>
 
@@ -235,8 +277,8 @@ function ChatImportView() {
 
         {result ? (
           <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 shadow-sm">
-            Imported {result.records_received} messages into Agent #
-            {result.target_agent_id}: {result.me_messages} me,{" "}
+            Imported {result.records_received} messages into{" "}
+            {session.agent_name ?? "current Agent"}: {result.me_messages} me,{" "}
             {result.others_messages} others, {result.chunks_added} memory chunk(s).
           </div>
         ) : null}
@@ -292,15 +334,49 @@ function ChatImportView() {
             </div>
 
             <div className="mt-6">
-              <h2 className="text-base font-semibold text-gray-950">
-                Sender ID 映射
-              </h2>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-950">
+                    Sender 映射
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    用用户名/Agent 名称选择，不需要手填 Agent ID。
+                  </p>
+                </div>
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-80 sm:flex-row sm:items-end">
+                  <label className="block flex-1">
+                    <span className="text-xs font-medium text-gray-500">
+                      Admin key
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
+                      onChange={(event) => setAdminKey(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void loadAgentChoices();
+                        }
+                      }}
+                      type="password"
+                      value={adminKey}
+                    />
+                  </label>
+                  <button
+                    className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={isLoadingAgents}
+                    onClick={loadAgentChoices}
+                    type="button"
+                  >
+                    {isLoadingAgents ? "Loading..." : "Load agents"}
+                  </button>
+                </div>
+              </div>
               <div className="mt-3 overflow-hidden rounded-xl border border-gray-200">
                 <table className="min-w-full divide-y divide-gray-200 text-sm">
                   <thead className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
                     <tr>
                       <th className="px-4 py-3 font-semibold">sender_id</th>
-                      <th className="px-4 py-3 font-semibold">Loop Agent ID</th>
+                      <th className="px-4 py-3 font-semibold">Loop Agent</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 bg-white">
@@ -311,23 +387,32 @@ function ChatImportView() {
                             {senderId}
                           </td>
                           <td className="px-4 py-3">
-                            <input
+                            <select
                               className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                              min={1}
                               onChange={(event) =>
                                 setSenderMap((currentMap) => ({
                                   ...currentMap,
                                   [senderId]: event.target.value,
                                 }))
                               }
-                              placeholder={
-                                session.agent_id && senderId === session.username
-                                  ? String(session.agent_id)
-                                  : "Agent ID"
-                              }
-                              type="number"
                               value={senderMap[senderId] ?? ""}
-                            />
+                            >
+                              <option value="">Choose Agent</option>
+                              {session.agent_id ? (
+                                <option value={session.agent_id}>
+                                  @{session.username} ·{" "}
+                                  {session.agent_name ?? "current Agent"}
+                                </option>
+                              ) : null}
+                              {agentChoices.map((choice) => (
+                                <option
+                                  key={choice.agent.id}
+                                  value={choice.agent.id}
+                                >
+                                  @{choice.user.username} · {choice.agent.agent_name}
+                                </option>
+                              ))}
+                            </select>
                           </td>
                         </tr>
                       ))
@@ -389,7 +474,10 @@ function ChatImportView() {
                         </span>
                         <span>→</span>
                         <span className="font-semibold text-gray-700">
-                          {mappedAgentId ? `Agent #${mappedAgentId}` : "unmapped"}
+                          {mappedAgentId
+                            ? agentLabelById.get(Number(mappedAgentId)) ??
+                              `Agent #${mappedAgentId}`
+                            : "unmapped"}
                         </span>
                         <span
                           className={`rounded-full px-2 py-0.5 font-medium ${

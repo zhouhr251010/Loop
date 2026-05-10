@@ -44,6 +44,27 @@ def simulate_single_agent_post(
 
 
 @router.post(
+    "/user/{username}/post",
+    response_model=PostOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def simulate_user_agent_post(
+    username: str,
+    db: Session = Depends(get_db),
+    _admin_key: None = Depends(require_admin_key),
+) -> PostOut:
+    """Generate a post for the Agent owned by a username."""
+    db_agent = agent_crud.get_agent_by_username(db, username.strip())
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found for this username.",
+        )
+
+    return _simulate_agent_post(db, db_agent)
+
+
+@router.post(
     "/tick",
     response_model=list[PostOut],
     status_code=status.HTTP_201_CREATED,

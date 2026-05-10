@@ -12,10 +12,23 @@ type ChatMessage = {
   content: string;
   timestamp: string;
   memoryChunksUsed?: number;
+  modelUsed?: ChatModelChoice;
+  warning?: string | null;
 };
+
+type ChatModelChoice = "fast" | "deep";
+
+const CHAT_MODEL_STORAGE_KEY = "loop_chat_model";
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function loadChatModel(): ChatModelChoice {
+  if (typeof window === "undefined") {
+    return "fast";
+  }
+  return localStorage.getItem(CHAT_MODEL_STORAGE_KEY) === "deep" ? "deep" : "fast";
 }
 
 export default function ChatPage() {
@@ -26,8 +39,11 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [chatModel, setChatModel] = useState<ChatModelChoice>("fast");
 
   useEffect(() => {
+    setChatModel(loadChatModel());
+
     async function bootstrap() {
       const storedSession = loadSession();
       if (!storedSession) {
@@ -41,9 +57,7 @@ export default function ChatPage() {
       }
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${storedSession.user_id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         const hydratedSession = {
           ...storedSession,
           agent_id: agent.id,
@@ -87,21 +101,23 @@ export default function ChatPage() {
 
     try {
       const result = await apiRequest<ChatReply>(
-        `/api/agents/${session.agent_id}/chat`,
+        "/api/agents/me/chat",
         {
           method: "POST",
-          body: JSON.stringify({ message: content }),
+          body: JSON.stringify({ message: content, model: chatModel }),
         },
       );
 
       setMessages((current) => [
         ...current,
         {
-          id: `agent-${result.chat_log.id}`,
+          id: `agent-${result.chat_log?.id ?? Date.now()}`,
           role: "agent",
           content: result.reply,
-          timestamp: result.chat_log.timestamp,
+          timestamp: result.chat_log?.timestamp ?? nowIso(),
           memoryChunksUsed: result.memory_chunks_used,
+          modelUsed: result.model_used,
+          warning: result.warning,
         },
       ]);
     } catch (err) {
@@ -109,6 +125,11 @@ export default function ChatPage() {
     } finally {
       setIsSending(false);
     }
+  }
+
+  function updateChatModel(model: ChatModelChoice) {
+    setChatModel(model);
+    localStorage.setItem(CHAT_MODEL_STORAGE_KEY, model);
   }
 
   if (!session) {
@@ -162,21 +183,44 @@ export default function ChatPage() {
           <div ref={bottomRef} />
         </section>
 
-        <form className="mt-4 flex gap-3" onSubmit={sendMessage}>
-          <input
-            className="min-w-0 flex-1 rounded-full border border-gray-200 bg-white px-5 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-            disabled={!session.agent_id || isSending}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="Send a private sync message..."
-            value={input}
-          />
-          <button
-            className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={!session.agent_id || isSending || !input.trim()}
-            type="submit"
-          >
-            {isSending ? "Sending..." : "Send"}
-          </button>
+        <form className="mt-4 space-y-3" onSubmit={sendMessage}>
+          <div className="flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
+            <label
+              className="text-xs font-semibold uppercase tracking-wide text-gray-500"
+              htmlFor="chat-model"
+            >
+              Model
+            </label>
+            <select
+              className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+              disabled={isSending}
+              id="chat-model"
+              onChange={(event) =>
+                updateChatModel(event.target.value as ChatModelChoice)
+              }
+              value={chatModel}
+            >
+              <option value="fast">DeepSeek Chat</option>
+              <option value="deep">DeepSeek V4 Pro</option>
+            </select>
+          </div>
+
+          <div className="flex gap-3">
+            <input
+              className="min-w-0 flex-1 rounded-full border border-gray-200 bg-white px-5 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+              disabled={!session.agent_id || isSending}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="Send a private sync message..."
+              value={input}
+            />
+            <button
+              className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!session.agent_id || isSending || !input.trim()}
+              type="submit"
+            >
+              {isSending ? "Sending..." : "Send"}
+            </button>
+          </div>
         </form>
       </div>
     </main>
@@ -199,6 +243,16 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         {!isUser && message.memoryChunksUsed ? (
           <p className="mt-2 text-[11px] font-medium text-indigo-500">
             Memory Vault active · {message.memoryChunksUsed} fragments
+          </p>
+        ) : null}
+        {!isUser && message.modelUsed ? (
+          <p className="mt-1 text-[11px] font-medium text-gray-400">
+            {message.modelUsed === "deep" ? "DeepSeek V4 Pro" : "DeepSeek Chat"}
+          </p>
+        ) : null}
+        {!isUser && message.warning ? (
+          <p className="mt-2 text-[11px] font-medium text-amber-600">
+            {message.warning}
           </p>
         ) : null}
         <p

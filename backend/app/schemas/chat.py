@@ -1,14 +1,18 @@
 """Pydantic schemas for daily private sync chats."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+ChatModelChoice = Literal["fast", "deep"]
 
 
 class ChatMessageCreate(BaseModel):
     """Incoming private chat message from the user."""
 
     message: str = Field(..., min_length=1, max_length=4000)
+    model: ChatModelChoice = "fast"
 
 
 class ChatLogOut(BaseModel):
@@ -27,5 +31,8 @@ class ChatReplyOut(BaseModel):
     """Response returned after a private sync message."""
 
     reply: str
-    chat_log: ChatLogOut
+    chat_log: ChatLogOut | None = None
     memory_chunks_used: int = 0
+    model_used: ChatModelChoice = "fast"
+    stored: bool = True
+    warning: str | None = None

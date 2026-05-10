@@ -38,13 +38,16 @@ export type HealthResponse = {
 export type ChatReply = {
   reply: string;
   memory_chunks_used: number;
+  model_used: "fast" | "deep";
+  stored: boolean;
+  warning?: string | null;
   chat_log: {
     id: number;
     agent_id: number;
     user_message: string;
     agent_reply: string;
     timestamp: string;
-  };
+  } | null;
 };
 
 export type MemoryUploadResponse = {

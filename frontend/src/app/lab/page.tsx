@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   API_BASE_URL,
   Agent,
+  AgentSessionChoice,
   HealthResponse,
   PostOut,
   apiRequest,
@@ -19,7 +20,8 @@ export default function LabPage() {
   const [session, setSession] = useState<LoopSession | null>(null);
   const [adminKey, setAdminKey] = useState("");
   const [targetAgentId, setTargetAgentId] = useState("");
-  const [targetUserId, setTargetUserId] = useState("");
+  const [targetUsername, setTargetUsername] = useState("");
+  const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [singlePost, setSinglePost] = useState<PostOut | null>(null);
   const [tickPosts, setTickPosts] = useState<PostOut[]>([]);
@@ -31,6 +33,7 @@ export default function LabPage() {
   const [isSimulatingOne, setIsSimulatingOne] = useState(false);
   const [isTicking, setIsTicking] = useState(false);
   const [isExporting, setIsExporting] = useState<ExportKind | null>(null);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
 
   const hasAdminKey = useMemo(() => adminKey.trim().length > 0, [adminKey]);
 
@@ -43,16 +46,14 @@ export default function LabPage() {
       }
 
       setSession(storedSession);
-      setTargetUserId(String(storedSession.user_id));
+      setTargetUsername(storedSession.username);
       if (storedSession.agent_id) {
         setTargetAgentId(String(storedSession.agent_id));
         return;
       }
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${storedSession.user_id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         const hydratedSession = {
           ...storedSession,
           agent_id: agent.id,
@@ -75,6 +76,42 @@ export default function LabPage() {
     };
   }
 
+  async function loadAgentChoices() {
+    if (!hasAdminKey) {
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setIsLoadingAgents(true);
+    try {
+      const choices = await apiRequest<AgentSessionChoice[]>(
+        "/api/users/agent-choices",
+        {
+          headers: adminHeaders(),
+        },
+      );
+      setAgentChoices(choices);
+      setMessage(`Loaded ${choices.length} Agent choice(s).`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load agents.");
+    } finally {
+      setIsLoadingAgents(false);
+    }
+  }
+
+  function chooseAgent(agentId: string) {
+    const choice = agentChoices.find(
+      (item) => String(item.agent.id) === agentId,
+    );
+    if (!choice) {
+      return;
+    }
+
+    setTargetAgentId(String(choice.agent.id));
+    setTargetUsername(choice.user.username);
+  }
+
   async function checkHealth() {
     setError("");
     setMessage("");
@@ -92,7 +129,7 @@ export default function LabPage() {
 
   async function simulateOne(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!hasAdminKey || !targetAgentId.trim()) {
+    if (!hasAdminKey || !targetUsername.trim()) {
       return;
     }
 
@@ -101,14 +138,14 @@ export default function LabPage() {
     setIsSimulatingOne(true);
     try {
       const post = await apiRequest<PostOut>(
-        `/api/simulate/agent/${Number(targetAgentId)}/post`,
+        `/api/simulate/user/${encodeURIComponent(targetUsername.trim())}/post`,
         {
           method: "POST",
           headers: adminHeaders(),
         },
       );
       setSinglePost(post);
-      setMessage(`Generated one simulated post for Agent #${post.agent_id}.`);
+      setMessage(`Generated one simulated post for @${targetUsername.trim()}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Single-agent simulation failed.");
     } finally {
@@ -139,7 +176,7 @@ export default function LabPage() {
   }
 
   async function exportJsonl(kind: ExportKind) {
-    if (!hasAdminKey || !targetUserId.trim()) {
+    if (!hasAdminKey || !targetUsername.trim()) {
       return;
     }
 
@@ -148,7 +185,9 @@ export default function LabPage() {
     setIsExporting(kind);
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/export/${Number(targetUserId)}/${kind}`,
+        `${API_BASE_URL}/api/export/by-username/${encodeURIComponent(
+          targetUsername.trim(),
+        )}/${kind}`,
         {
           headers: {
             ...adminHeaders(),
@@ -162,11 +201,11 @@ export default function LabPage() {
       }
 
       const text = await response.text();
-      const filename = `loop_user_${Number(targetUserId)}_${kind}.jsonl`;
+      const filename = `loop_user_${targetUsername.trim()}_${kind}.jsonl`;
       downloadText(filename, text);
       setExportPreview(text.split("\n").slice(0, 8).join("\n"));
       setExportMeta(`${filename} · ${text.length.toLocaleString()} characters`);
-      setMessage(`Exported ${kind} for user #${Number(targetUserId)}.`);
+      setMessage(`Exported ${kind} for @${targetUsername.trim()}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Export failed.");
     } finally {
@@ -196,17 +235,12 @@ export default function LabPage() {
             集中测试健康检查、自动仿真发帖、全体 tick，以及研究数据 JSONL 导出。
           </p>
           <p className="mt-2 text-sm text-gray-400">
-            User #{session.user_id} ·{" "}
-            <span className="font-medium text-gray-600">{session.username}</span>
+            Signed in as{" "}
+            <span className="font-medium text-gray-600">@{session.username}</span>
             {" · "}
-            {session.agent_id ? (
-              <span className="font-medium text-gray-600">
-                Agent #{session.agent_id}
-                {session.agent_name ? ` · ${session.agent_name}` : ""}
-              </span>
-            ) : (
-              <span>No Agent yet</span>
-            )}
+            <span className="font-medium text-gray-600">
+              {session.agent_name ?? "No Agent yet"}
+            </span>
           </p>
         </header>
 
@@ -222,7 +256,7 @@ export default function LabPage() {
         ) : null}
 
         <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px_220px_auto]">
             <label className="block">
               <span className="text-sm font-medium text-gray-700">
                 Admin API key
@@ -236,25 +270,39 @@ export default function LabPage() {
               />
             </label>
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">Agent ID</span>
+              <span className="text-sm font-medium text-gray-700">Username</span>
               <input
                 className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                min={1}
-                onChange={(event) => setTargetAgentId(event.target.value)}
-                type="number"
-                value={targetAgentId}
+                onChange={(event) => setTargetUsername(event.target.value)}
+                placeholder="participant username"
+                value={targetUsername}
               />
             </label>
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">User ID</span>
-              <input
+              <span className="text-sm font-medium text-gray-700">Agent picker</span>
+              <select
                 className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                min={1}
-                onChange={(event) => setTargetUserId(event.target.value)}
-                type="number"
-                value={targetUserId}
-              />
+                onChange={(event) => chooseAgent(event.target.value)}
+                value={targetAgentId}
+              >
+                <option value="">Choose loaded Agent</option>
+                {agentChoices.map((choice) => (
+                  <option key={choice.agent.id} value={choice.agent.id}>
+                    @{choice.user.username} · {choice.agent.agent_name}
+                  </option>
+                ))}
+              </select>
             </label>
+            <div className="flex items-end">
+              <button
+                className="w-full rounded-full bg-gray-950 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
+                disabled={!hasAdminKey || isLoadingAgents}
+                onClick={loadAgentChoices}
+                type="button"
+              >
+                {isLoadingAgents ? "Loading..." : "Load agents"}
+              </button>
+            </div>
           </div>
         </section>
 
@@ -300,7 +348,7 @@ export default function LabPage() {
             <div className="mt-4 flex flex-wrap gap-3">
               <button
                 className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || !targetUserId || isExporting !== null}
+                disabled={!hasAdminKey || !targetUsername || isExporting !== null}
                 onClick={() => exportJsonl("chatlogs")}
                 type="button"
               >
@@ -308,7 +356,7 @@ export default function LabPage() {
               </button>
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || !targetUserId || isExporting !== null}
+                disabled={!hasAdminKey || !targetUsername || isExporting !== null}
                 onClick={() => exportJsonl("feedbacks")}
                 type="button"
               >
@@ -336,12 +384,12 @@ export default function LabPage() {
                     Single Agent simulation
                   </h2>
                   <p className="mt-1 text-sm leading-6 text-gray-500">
-                    测试 `POST /api/simulate/agent/{targetAgentId || "agent_id"}/post`。
+                    测试 `POST /api/simulate/user/{targetUsername || "username"}/post`。
                   </p>
                 </div>
                 <button
                   className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!hasAdminKey || !targetAgentId || isSimulatingOne}
+                  disabled={!hasAdminKey || !targetUsername || isSimulatingOne}
                   type="submit"
                 >
                   {isSimulatingOne ? "Generating..." : "Generate post"}

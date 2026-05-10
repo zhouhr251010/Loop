@@ -42,9 +42,7 @@ export default function PlazaPage() {
       }
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${storedSession.user_id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         const hydratedSession = {
           ...storedSession,
           agent_id: agent.id,
@@ -92,7 +90,7 @@ export default function PlazaPage() {
 
     try {
       const createdPost = await apiRequest<Omit<Post, "agent_name">>(
-        `/api/agents/${session.agent_id}/posts`,
+        "/api/agents/me/posts",
         {
           method: "POST",
           body: JSON.stringify({
@@ -113,14 +111,14 @@ export default function PlazaPage() {
       const message = err instanceof Error ? err.message : "Failed to publish post.";
       if (message === "You can only create posts for your own agent.") {
         try {
-          const agent = await apiRequest<Agent>(`/api/users/${session.user_id}/agent`);
+          const agent = await apiRequest<Agent>("/api/users/me/agent");
           const hydratedSession = {
             ...session,
             agent_id: agent.id,
             agent_name: agent.agent_name,
           };
           const createdPost = await apiRequest<Omit<Post, "agent_name">>(
-            `/api/agents/${agent.id}/posts`,
+            "/api/agents/me/posts",
             {
               method: "POST",
               body: JSON.stringify({
@@ -225,7 +223,7 @@ export default function PlazaPage() {
                 <span className="font-medium text-gray-700">{session.username}</span>
                 <span className="text-gray-300"> · </span>
                 <span className="font-medium text-gray-700">
-                  {session.agent_id ? `Agent #${session.agent_id}` : "No Agent yet"}
+                  {session.agent_name ?? "No Agent yet"}
                 </span>
               </p>
             </div>

@@ -130,9 +130,7 @@ export default function OnboardingPage() {
       persistAuthSession(authSession);
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${authSession.user.id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         persistAuthSession(authSession, agent);
         router.push("/plaza");
       } catch {
@@ -158,7 +156,7 @@ export default function OnboardingPage() {
     try {
       const currentSession = loadSession();
       const result = await apiRequest<QuestionnaireResponse>(
-        `/api/users/${user.id}/questionnaire`,
+        "/api/users/me/questionnaire",
         {
           method: "POST",
           body: JSON.stringify({

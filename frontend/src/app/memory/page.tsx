@@ -45,9 +45,7 @@ export default function MemoryPage() {
       }
 
       try {
-        const agent = await apiRequest<Agent>(
-          `/api/users/${storedSession.user_id}/agent`,
-        );
+        const agent = await apiRequest<Agent>("/api/users/me/agent");
         const hydratedSession = {
           ...storedSession,
           agent_id: agent.id,
@@ -84,13 +82,13 @@ export default function MemoryPage() {
     try {
       const [state, graph, preview] = await Promise.all([
         apiRequest<AgentWorkingMemoryState>(
-          `/api/agents/${targetSession.agent_id}/memory/state`,
+          "/api/agents/me/memory/state",
         ),
         apiRequest<Relationship[]>(
-          `/api/agents/${targetSession.agent_id}/relationships`,
+          "/api/agents/me/relationships",
         ),
         apiRequest<PersonalizedPostPreview[]>(
-          `/api/agents/${targetSession.agent_id}/feed-preview?limit=12`,
+          "/api/agents/me/feed-preview?limit=12",
         ),
       ]);
       setWorkingState(state);
@@ -115,7 +113,7 @@ export default function MemoryPage() {
 
     try {
       const result = await apiRequest<MemoryUploadResponse>(
-        `/api/users/${session.user_id}/memory/upload`,
+        "/api/users/me/memory/upload",
         {
           method: "POST",
           body: JSON.stringify({ content: content.trim() }),
@@ -140,7 +138,7 @@ export default function MemoryPage() {
     setIsSearching(true);
     try {
       const result = await apiRequest<MemorySearchResponse>(
-        `/api/users/${session.user_id}/memory/search`,
+        "/api/users/me/memory/search",
         {
           method: "POST",
           body: JSON.stringify({
@@ -167,7 +165,7 @@ export default function MemoryPage() {
     setIsSleeping(true);
     try {
       const result = await apiRequest<MemoryConsolidationResponse>(
-        `/api/agents/${session.agent_id}/sleep`,
+        "/api/agents/me/sleep",
         { method: "POST" },
       );
       setSleepResult(result);
@@ -189,7 +187,7 @@ export default function MemoryPage() {
     setIsClearing(true);
     try {
       const state = await apiRequest<AgentWorkingMemoryState>(
-        `/api/agents/${session.agent_id}/memory/clear`,
+        "/api/agents/me/memory/clear",
         { method: "POST" },
       );
       setWorkingState(state);
@@ -225,17 +223,12 @@ export default function MemoryPage() {
                 用于手动测试 RAG 情景记忆、睡眠巩固、短期工作记忆清空，以及熟人社会图谱对信息茧房排序的影响。
               </p>
               <p className="mt-2 text-sm text-gray-400">
-                User #{session.user_id} ·{" "}
-                <span className="font-medium text-gray-600">{session.username}</span>
+                Testing as{" "}
+                <span className="font-medium text-gray-600">@{session.username}</span>
                 {" · "}
-                {session.agent_id ? (
-                  <span className="font-medium text-gray-600">
-                    Agent #{session.agent_id}
-                    {session.agent_name ? ` · ${session.agent_name}` : ""}
-                  </span>
-                ) : (
-                  <span>No Agent yet</span>
-                )}
+                <span className="font-medium text-gray-600">
+                  {session.agent_name ?? "No Agent yet"}
+                </span>
               </p>
             </div>
             <button

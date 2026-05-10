@@ -2,6 +2,7 @@
 
 import json
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
@@ -21,6 +22,16 @@ def get_agents(db: Session) -> list[models.Agent]:
 def get_agent_by_user_id(db: Session, user_id: int) -> models.Agent | None:
     """Return the agent associated with a user, if one exists."""
     return db.query(models.Agent).filter(models.Agent.user_id == user_id).first()
+
+
+def get_agent_by_username(db: Session, username: str) -> models.Agent | None:
+    """Return the agent associated with a username, if one exists."""
+    return (
+        db.query(models.Agent)
+        .join(models.User)
+        .filter(func.lower(models.User.username) == username.lower())
+        .first()
+    )
 
 
 def build_system_prompt_base(user: models.User) -> str:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models
+from app.crud import agent as agent_crud
 from app.crud import feedback as feedback_crud
 from app.crud import post as post_crud
 from app.database import get_db
@@ -13,6 +14,31 @@ from app.security import get_current_user
 
 
 router = APIRouter(tags=["posts"])
+
+
+def _require_current_agent(db: Session, current_user: models.User) -> models.Agent:
+    db_agent = agent_crud.get_agent_by_user_id(db, current_user.id)
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found for this user.",
+        )
+    return db_agent
+
+
+@router.post(
+    "/api/agents/me/posts",
+    response_model=PostOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_my_agent_post(
+    post_in: PostCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> PostOut:
+    """Create a public-square post for the authenticated user's Agent."""
+    db_agent = _require_current_agent(db, current_user)
+    return post_crud.create_post(db, db_agent.id, post_in)
 
 
 @router.post(

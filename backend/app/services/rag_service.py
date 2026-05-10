@@ -9,8 +9,12 @@ import sqlite3
 from typing import Any
 from uuid import uuid4
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(PROJECT_ROOT / ".env")
+
 CHROMA_PATH = PROJECT_ROOT / "chroma_db"
 COLLECTION_NAME = "loop_memories_bge_v1"
 MODEL_NAME = "BAAI/bge-large-zh-v1.5"
@@ -18,6 +22,10 @@ EMBEDDING_DIMENSIONS = 1024
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-large"
 EMBEDDING_DEVICE_ENV = "LOOP_EMBEDDING_DEVICE"
 RERANKER_DEVICE_ENV = "LOOP_RERANKER_DEVICE"
+VECTOR_RAG_ENABLED_ENV = "LOOP_VECTOR_RAG_ENABLED"
+RERANKER_ENABLED_ENV = "LOOP_RERANKER_ENABLED"
+RAG_STRICT_ENV = "LOOP_RAG_STRICT"
+RAG_PRELOAD_ENV = "LOOP_RAG_PRELOAD"
 MAX_CHUNK_CHARS = 300
 RECALL_TOP_K = 15
 FALLBACK_SCAN_LIMIT = 50
@@ -25,6 +33,18 @@ MIN_MEMORY_RESULTS = 2
 BGE_QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean environment flag."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _strict_rag_enabled() -> bool:
+    return _env_flag(RAG_STRICT_ENV, default=True)
 
 
 def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
@@ -159,9 +179,14 @@ def _get_collection() -> Any:
 @lru_cache(maxsize=1)
 def _get_reranker() -> Any | None:
     """Load the BGE cross-encoder reranker, falling back cleanly if unavailable."""
+    if not _env_flag(RERANKER_ENABLED_ENV, default=True):
+        return None
+
     try:
         from sentence_transformers import CrossEncoder
     except Exception as exc:
+        if _strict_rag_enabled():
+            raise RuntimeError("sentence-transformers CrossEncoder import failed.") from exc
         logger.warning("sentence-transformers CrossEncoder import failed: %s", exc)
         return None
 
@@ -169,6 +194,10 @@ def _get_reranker() -> Any | None:
     try:
         return CrossEncoder(RERANKER_MODEL_NAME, device=device, max_length=512)
     except Exception as exc:
+        if _strict_rag_enabled() or os.getenv(RERANKER_DEVICE_ENV):
+            raise RuntimeError(
+                f"Failed to load reranker '{RERANKER_MODEL_NAME}' on {device}.",
+            ) from exc
         logger.warning(
             "Failed to load reranker '%s' on %s: %s",
             RERANKER_MODEL_NAME,
@@ -193,8 +222,25 @@ def _get_reranker() -> Any | None:
 def _embed_texts(texts: list[str]) -> list[list[float]]:
     """Return plain Python-list embeddings for ChromaDB."""
     model = _get_embedding_model()
-    embeddings = model.encode(texts, normalize_embeddings=True)
+    embeddings = model.encode(
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
     return embeddings.tolist()
+
+
+def warm_up_rag_models() -> None:
+    """Load local RAG models during API startup so chat latency is predictable."""
+    if not _env_flag(RAG_PRELOAD_ENV, default=True):
+        return
+
+    _get_collection()
+    if _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
+        _embed_texts(["Loop RAG warmup"])
+
+    if _env_flag(RERANKER_ENABLED_ENV, default=True):
+        _rerank_documents("Loop RAG warmup", ["Loop RAG warmup memory"], top_k=1)
 
 
 def _embed_query(query: str) -> list[float]:
@@ -286,8 +332,10 @@ def _rerank_documents(query: str, documents: list[str], top_k: int) -> list[str]
 
     pairs = [[query, document] for document in documents]
     try:
-        scores = reranker.predict(pairs)
+        scores = reranker.predict(pairs, show_progress_bar=False)
     except Exception as exc:
+        if _strict_rag_enabled():
+            raise
         logger.warning("BGE reranker prediction failed: %s", exc)
         return documents[:top_k]
 
@@ -439,8 +487,10 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
     if top_k <= 0:
         return []
 
+    logger.info(f"[RAG Engine] Querying Memory Vault for: '{clean_query}'")
+    top_score: float | str = "N/A"
     recalled_documents: list[str] = []
-    if clean_query:
+    if clean_query and _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
         try:
             collection = _get_collection()
             query_embedding = _embed_query(clean_query)
@@ -452,7 +502,12 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
             documents = results.get("documents") or []
             if documents:
                 recalled_documents.extend(documents[0])
+            distances = results.get("distances") or []
+            if distances and distances[0]:
+                top_score = float(distances[0][0])
         except Exception as exc:
+            if _strict_rag_enabled():
+                raise
             logger.warning("BGE vector recall failed: %s", exc)
             recalled_documents = []
 
@@ -500,6 +555,10 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
             if len(unique_documents) >= target_count or len(unique_documents) >= top_k:
                 break
 
+    logger.info(
+        f"[RAG Engine] Retrieved {len(unique_documents)} fragments. "
+        f"Top match score: {top_score}",
+    )
     return unique_documents
 
 

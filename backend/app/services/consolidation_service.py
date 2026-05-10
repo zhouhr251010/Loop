@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app import models
@@ -17,9 +20,30 @@ from app.services.core_memory_service import merge_core_memory_insight
 from app.services.rag_service import add_scored_memories
 
 
+logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(PROJECT_ROOT / ".env")
+
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+DEFAULT_THINKING_MODE = os.getenv("DEEPSEEK_THINKING", "enabled")
+DEFAULT_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "high")
 REFLECTION_BATCH_SIZE = 5
+
+
+def _deepseek_extra_body() -> dict[str, dict[str, str]]:
+    thinking_mode = DEFAULT_THINKING_MODE.strip().lower() or "disabled"
+    if thinking_mode not in {"enabled", "disabled"}:
+        thinking_mode = "disabled"
+    return {"thinking": {"type": thinking_mode}}
+
+
+def _deepseek_reasoning_effort() -> str | None:
+    if (_deepseek_extra_body()["thinking"]["type"]) != "enabled":
+        return None
+
+    effort = DEFAULT_REASONING_EFFORT.strip().lower() or "high"
+    return effort if effort in {"high", "max"} else "high"
 
 
 def _format_timestamp(value) -> str:
@@ -159,6 +183,8 @@ def _call_deepseek_json(
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=max_tokens,
+            extra_body=_deepseek_extra_body(),
+            reasoning_effort=_deepseek_reasoning_effort(),
         )
         return response.choices[0].message.content or ""
     except Exception:
@@ -335,6 +361,8 @@ def _analyze_relationship_changes(
                 {"role": "user", "content": prompt},
             ],
             max_tokens=240,
+            extra_body=_deepseek_extra_body(),
+            reasoning_effort=_deepseek_reasoning_effort(),
         )
         raw_text = response.choices[0].message.content or ""
     except Exception:
@@ -530,9 +558,14 @@ def _maybe_create_high_level_insight(
     if len(pending_events) < REFLECTION_BATCH_SIZE:
         return 0, False
 
+    logger.info(
+        f"[Reflection Triggered] Event count reached threshold. "
+        f"Initiating high-level reflection.",
+    )
     insight = _deep_reflect_on_events(source_agent, pending_events)
     if not insight:
         return 0, False
+    logger.info(f"[Insight Generated] \n{insight}")
 
     now = utc_now_seconds()
     db.add(
@@ -671,6 +704,10 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
         raise ValueError("User or agent not found.")
 
     source_agent = user.agent
+    logger.info(
+        f"[Sleep Consolidation] Processing short-term memories for "
+        f"Agent {source_agent.id}...",
+    )
     records, candidate_agents = _collect_daily_records(db, source_agent)
     chunks_added = 0
     graph_triples: list[dict[str, Any]] = []

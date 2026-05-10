@@ -30,6 +30,30 @@ from app.services.rag_service import add_agent_chat_memories, add_memory, retrie
 router = APIRouter(tags=["memory"])
 
 
+def _require_current_agent(db: Session, current_user: models.User) -> models.Agent:
+    db_agent = agent_crud.get_agent_by_user_id(db, current_user.id)
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found for this user.",
+        )
+    return db_agent
+
+
+@router.post(
+    "/api/users/me/memory/upload",
+    response_model=MemoryUploadOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_my_memory(
+    memory_in: MemoryUploadCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> MemoryUploadOut:
+    """Store long-form memories for the authenticated user."""
+    return upload_user_memory(current_user.id, memory_in, db, current_user)
+
+
 @router.post(
     "/api/users/{user_id}/memory/upload",
     response_model=MemoryUploadOut,
@@ -71,6 +95,16 @@ def upload_user_memory(
     return MemoryUploadOut(message="Memory uploaded.", chunks_added=chunks_added)
 
 
+@router.post("/api/users/me/memory/search", response_model=MemorySearchOut)
+def search_my_memory(
+    search_in: MemorySearchCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> MemorySearchOut:
+    """Retrieve RAG chunks for the authenticated user."""
+    return search_user_memory(current_user.id, search_in, db, current_user)
+
+
 @router.post("/api/users/{user_id}/memory/search", response_model=MemorySearchOut)
 def search_user_memory(
     user_id: int,
@@ -92,6 +126,20 @@ def search_user_memory(
         top_k=search_in.top_k,
     )
     return MemorySearchOut(query=search_in.query.strip(), chunks=chunks)
+
+
+@router.post(
+    "/api/agents/me/sleep",
+    response_model=MemoryConsolidationOut,
+    status_code=status.HTTP_200_OK,
+)
+def sleep_my_agent(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> MemoryConsolidationOut:
+    """Manually trigger sleep-like memory consolidation for my Agent."""
+    db_agent = _require_current_agent(db, current_user)
+    return sleep_agent(db_agent.id, db, current_user)
 
 
 @router.post(
@@ -155,6 +203,21 @@ def _require_owned_agent(
             detail="You can only inspect your own agent.",
         )
     return db_agent
+
+
+@router.post(
+    "/api/agents/me/import_chat",
+    response_model=ImportedChatBatchOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def import_my_agent_group_chat(
+    chat_import: ImportedChatBatchCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> ImportedChatBatchOut:
+    """Import group-chat history from the authenticated Agent's perspective."""
+    db_agent = _require_current_agent(db, current_user)
+    return import_agent_group_chat(db_agent.id, chat_import, db, current_user)
 
 
 @router.post(
@@ -228,6 +291,19 @@ def import_agent_group_chat(
 
 
 @router.get(
+    "/api/agents/me/memory/state",
+    response_model=AgentWorkingMemoryOut,
+)
+def get_my_agent_working_memory_state(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> AgentWorkingMemoryOut:
+    """Inspect my Agent's short-term LangGraph memory checkpoint."""
+    db_agent = _require_current_agent(db, current_user)
+    return get_agent_working_memory_state(db_agent.id, db, current_user)
+
+
+@router.get(
     "/api/agents/{agent_id}/memory/state",
     response_model=AgentWorkingMemoryOut,
 )
@@ -244,6 +320,19 @@ def get_agent_working_memory_state(
 
 
 @router.post(
+    "/api/agents/me/memory/clear",
+    response_model=AgentWorkingMemoryOut,
+)
+def clear_my_agent_working_memory_state(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> AgentWorkingMemoryOut:
+    """Clear my Agent's short-term LangGraph working memory."""
+    db_agent = _require_current_agent(db, current_user)
+    return clear_agent_working_memory_state(db_agent.id, db, current_user)
+
+
+@router.post(
     "/api/agents/{agent_id}/memory/clear",
     response_model=AgentWorkingMemoryOut,
 )
@@ -257,6 +346,20 @@ def clear_agent_working_memory_state(
     return AgentWorkingMemoryOut(
         **clear_graph_working_memory(agent_id=agent_id, user_id=current_user.id),
     )
+
+
+@router.get(
+    "/api/agents/me/relationships",
+    response_model=list[RelationshipOut],
+)
+def get_my_agent_relationships(
+    include_candidates: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> list[RelationshipOut]:
+    """Return the directed social-affinity graph from my Agent's perspective."""
+    db_agent = _require_current_agent(db, current_user)
+    return get_agent_relationships(db_agent.id, include_candidates, db, current_user)
 
 
 @router.get(
@@ -307,6 +410,20 @@ def get_agent_relationships(
         for agent in target_agents
     ]
     return sorted(rows, key=lambda row: row.affinity_score, reverse=True)
+
+
+@router.get(
+    "/api/agents/me/feed-preview",
+    response_model=list[PersonalizedPostPreviewOut],
+)
+def get_my_personalized_feed_preview(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+) -> list[PersonalizedPostPreviewOut]:
+    """Preview my personalized/filter-bubble feed."""
+    db_agent = _require_current_agent(db, current_user)
+    return get_personalized_feed_preview(db_agent.id, limit, db, current_user)
 
 
 @router.get(

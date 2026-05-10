@@ -106,6 +106,26 @@ def create_agent_session_choice(
 
 
 @router.post(
+    "/me/questionnaire",
+    response_model=QuestionnaireSubmissionOut,
+    status_code=status.HTTP_200_OK,
+)
+def submit_my_questionnaire(
+    questionnaire_in: QuestionnaireCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> QuestionnaireSubmissionOut:
+    """Save questionnaire data for the authenticated user."""
+    updated_user = user_crud.update_user_questionnaire(
+        db,
+        current_user,
+        questionnaire_in,
+    )
+    db_agent = agent_crud.create_or_update_agent_for_user(db, updated_user)
+    return QuestionnaireSubmissionOut(user=updated_user, agent=db_agent)
+
+
+@router.post(
     "/{user_id}/questionnaire",
     response_model=QuestionnaireSubmissionOut,
     status_code=status.HTTP_200_OK,
@@ -128,6 +148,22 @@ def submit_questionnaire(
     updated_user = user_crud.update_user_questionnaire(db, db_user, questionnaire_in)
     db_agent = agent_crud.create_or_update_agent_for_user(db, updated_user)
     return QuestionnaireSubmissionOut(user=updated_user, agent=db_agent)
+
+
+@router.get("/me/agent", response_model=AgentOut)
+def get_my_agent(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> AgentOut:
+    """Return the virtual agent associated with the authenticated user."""
+    db_agent = agent_crud.get_agent_by_user_id(db, current_user.id)
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found for this user.",
+        )
+
+    return db_agent
 
 
 @router.get("/{user_id}/agent", response_model=AgentOut)

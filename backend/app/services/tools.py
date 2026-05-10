@@ -1,5 +1,6 @@
 """LangChain tools that let Loop agents sense and act in the simulation."""
 
+import logging
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated
@@ -17,6 +18,7 @@ from app.services.core_memory_service import edit_user_core_memory
 from app.services.rag_service import retrieve_hybrid_memory
 
 
+logger = logging.getLogger(__name__)
 _current_tool_user_id: ContextVar[int | None] = ContextVar(
     "current_tool_user_id",
     default=None,
@@ -106,7 +108,16 @@ def edit_core_memory(
     new_value: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """Permanently edit one core memory field when identity-level facts change."""
+    """MUST BE CALLED whenever the user reveals critical personal information.
+
+    This includes long-term facts, health conditions such as allergies or
+    medical constraints, career changes, relationship changes, identity shifts,
+    life-altering events, stable preferences, or core values. Do not just reply
+    in text, do not say you will remember it, and do not rely on chat history.
+    You MUST use this tool to persist the data into long-term Core Memory.
+    Use key to name the affected core-memory field and new_value to store the
+    updated durable fact.
+    """
     user_id = _current_tool_user_id.get()
     if user_id is None:
         return Command(
@@ -122,12 +133,16 @@ def edit_core_memory(
 
     db = SessionLocal()
     try:
+        db_agent = agent_crud.get_agent_by_user_id(db, user_id)
+        agent_id = db_agent.id if db_agent is not None else user_id
+        logger.info(f"[Tool Execution] edit_core_memory called by Agent {agent_id}")
         core_memory = edit_user_core_memory(
             db=db,
             user_id=user_id,
             key=key,
             new_value=new_value,
         )
+        logger.info(f"[Core Memory Updated] New core concept saved: {new_value}")
     except ValueError as exc:
         return Command(
             update={
