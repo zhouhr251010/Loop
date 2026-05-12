@@ -248,7 +248,11 @@ def _embed_query(query: str) -> list[float]:
     return _embed_texts([f"{BGE_QUERY_INSTRUCTION}{query}"])[0]
 
 
-def _read_user_documents_from_sqlite(user_id: int, limit: int) -> list[str]:
+def _read_user_documents_from_sqlite(
+    user_id: int,
+    limit: int,
+    branch_id: str = "main",
+) -> list[str]:
     """Read stored Chroma documents for a user without starting the Chroma client."""
     database_path = CHROMA_PATH / "chroma.sqlite3"
     if not database_path.exists() or limit <= 0:
@@ -256,6 +260,7 @@ def _read_user_documents_from_sqlite(user_id: int, limit: int) -> list[str]:
 
     connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
     try:
+        normalized_branch_id = (branch_id or "main").strip() or "main"
         rows = connection.execute(
             """
             SELECT document_metadata.string_value
@@ -264,13 +269,17 @@ def _read_user_documents_from_sqlite(user_id: int, limit: int) -> list[str]:
               ON user_metadata.id = embeddings.id
              AND user_metadata.key = 'user_id'
              AND user_metadata.int_value = ?
+            JOIN embedding_metadata AS branch_metadata
+              ON branch_metadata.id = embeddings.id
+             AND branch_metadata.key = 'branch_id'
+             AND branch_metadata.string_value = ?
             JOIN embedding_metadata AS document_metadata
               ON document_metadata.id = embeddings.id
              AND document_metadata.key = 'chroma:document'
             ORDER BY embeddings.id DESC
             LIMIT ?
             """,
-            (user_id, limit),
+            (user_id, normalized_branch_id, limit),
         ).fetchall()
     finally:
         connection.close()
@@ -347,7 +356,7 @@ def _rerank_documents(query: str, documents: list[str], top_k: int) -> list[str]
     return [document for _, _, document in scored_documents[:top_k]]
 
 
-def add_memory(user_id: int, text: str) -> int:
+def add_memory(user_id: int, text: str, branch_id: str = "main") -> int:
     """Chunk and store user memory text in the local Chroma vector store."""
     chunks = _chunk_text(text)
     if not chunks:
@@ -357,7 +366,11 @@ def add_memory(user_id: int, text: str) -> int:
     embeddings = _embed_texts(chunks)
     ids = [f"user-{user_id}-{uuid4()}" for _ in chunks]
     metadatas = [
-        {"user_id": user_id, "embedding_model": MODEL_NAME}
+        {
+            "user_id": user_id,
+            "branch_id": (branch_id or "main").strip() or "main",
+            "embedding_model": MODEL_NAME,
+        }
         for _ in chunks
     ]
 
@@ -374,6 +387,7 @@ def add_scored_memories(
     user_id: int,
     agent_id: int,
     memories: list[dict[str, Any]],
+    branch_id: str = "main",
 ) -> int:
     """Store scored episodic memories while preserving SOTA ranking metadata."""
     documents: list[str] = []
@@ -398,6 +412,7 @@ def add_scored_memories(
                 {
                     "user_id": user_id,
                     "agent_id": agent_id,
+                    "branch_id": (branch_id or "main").strip() or "main",
                     "source": "sleep_consolidation",
                     "memory_layer": "episodic",
                     "similarity": similarity,
@@ -428,6 +443,7 @@ def add_agent_chat_memories(
     user_id: int,
     target_agent_id: int,
     messages: list[dict[str, Any]],
+    branch_id: str = "main",
 ) -> int:
     """Store group-chat memory from one target agent's private perspective."""
     documents: list[str] = []
@@ -449,6 +465,7 @@ def add_agent_chat_memories(
         for chunk_index, chunk in enumerate(chunks):
             metadata: dict[str, Any] = {
                 "user_id": user_id,
+                "branch_id": (branch_id or "main").strip() or "main",
                 "agent_id": target_agent_id,
                 "target_agent_id": target_agent_id,
                 "source": "group_chat_import",
@@ -481,12 +498,18 @@ def add_agent_chat_memories(
     return len(documents)
 
 
-def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
+def retrieve_memory(
+    user_id: int,
+    query: str,
+    top_k: int = 3,
+    branch_id: str = "main",
+) -> list[str]:
     """Retrieve relevant memory chunks with two-stage Advanced RAG."""
     clean_query = query.strip()
     if top_k <= 0:
         return []
 
+    normalized_branch_id = (branch_id or "main").strip() or "main"
     logger.info(f"[RAG Engine] Querying Memory Vault for: '{clean_query}'")
     top_score: float | str = "N/A"
     recalled_documents: list[str] = []
@@ -494,10 +517,16 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
         try:
             collection = _get_collection()
             query_embedding = _embed_query(clean_query)
+            where_filter: dict[str, Any] = {
+                "$and": [
+                    {"user_id": user_id},
+                    {"branch_id": normalized_branch_id},
+                ],
+            }
             results = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=max(RECALL_TOP_K, top_k),
-                where={"user_id": user_id},
+                where=where_filter,
             )
             documents = results.get("documents") or []
             if documents:
@@ -523,6 +552,7 @@ def retrieve_memory(user_id: int, query: str, top_k: int = 3) -> list[str]:
         fallback_documents = _read_user_documents_from_sqlite(
             user_id,
             limit=fallback_limit,
+            branch_id=normalized_branch_id,
         )
     except Exception as exc:
         logger.warning("SQLite memory fallback read failed: %s", exc)
@@ -566,9 +596,18 @@ def retrieve_hybrid_memory(
     user_id: int,
     query: str,
     top_k: int = 3,
+    branch_id: str = "main",
 ) -> list[str]:
     """Retrieve vector memories plus graph social context from SQL."""
-    memories = retrieve_memory(user_id=user_id, query=query, top_k=top_k)
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    memories = retrieve_memory(
+        user_id=user_id,
+        query=query,
+        top_k=top_k,
+        branch_id=normalized_branch_id,
+    )
+    if normalized_branch_id != "main":
+        return memories
     try:
         from app import models
         from app.database import SessionLocal

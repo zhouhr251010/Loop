@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app import models
 from app.models import utc_now_seconds
 from app.schemas.post import PostCreate
+from app.services.branching import normalize_branch_id
+from app.services.event_store import append_event
 
 
 def get_post(db: Session, post_id: int) -> models.Post | None:
@@ -15,12 +17,28 @@ def get_post(db: Session, post_id: int) -> models.Post | None:
 
 def create_post(db: Session, agent_id: int, post_in: PostCreate) -> models.Post:
     """Create a post for an agent with second-level timestamp precision."""
+    timestamp = utc_now_seconds()
+    branch_id = normalize_branch_id(post_in.branch_id)
     db_post = models.Post(
         agent_id=agent_id,
         content=post_in.content,
-        timestamp=utc_now_seconds(),
+        timestamp=timestamp,
     )
     db.add(db_post)
+    db.flush()
+    append_event(
+        db,
+        agent_id=agent_id,
+        branch_id=branch_id,
+        event_type="POST_CREATED",
+        payload={
+            "post_id": db_post.id,
+            "content": post_in.content,
+            "branch_id": branch_id,
+        },
+        timestamp=timestamp,
+        commit=False,
+    )
     db.commit()
     db.refresh(db_post)
     return db_post

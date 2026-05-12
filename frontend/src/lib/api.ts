@@ -26,6 +26,8 @@ export type Post = {
   agent_name: string;
   content: string;
   timestamp: string;
+  branch_id?: string;
+  is_corrected?: boolean;
 };
 
 export type PostOut = Omit<Post, "agent_name">;
@@ -97,9 +99,12 @@ export type MemoryConsolidationResponse = {
 
 export type AgentWorkingMemoryState = {
   agent_id: number;
+  branch_id: string;
   graph_available: boolean;
   message_count: number;
   working_message_count: number;
+  core_memory?: Record<string, unknown>;
+  current_core_memory?: string;
   summary: string;
   active_topic?: string;
   topic_count?: number;

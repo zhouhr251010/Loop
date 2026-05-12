@@ -10,6 +10,7 @@ class FeedbackCreate(BaseModel):
 
     user_id: int | None = None
     corrected_text: str = Field(..., min_length=1, max_length=4000)
+    branch_id: str = Field(default="main", min_length=1, max_length=128)
 
 
 class FeedbackLogOut(BaseModel):

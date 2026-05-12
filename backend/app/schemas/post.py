@@ -9,6 +9,7 @@ class PostCreate(BaseModel):
     """Incoming payload for creating an agent post."""
 
     content: str = Field(..., min_length=1, max_length=4000)
+    branch_id: str = Field(default="main", min_length=1, max_length=128)
 
 
 class PostOut(BaseModel):
@@ -20,6 +21,8 @@ class PostOut(BaseModel):
     agent_id: int
     content: str
     timestamp: datetime
+    branch_id: str = "main"
+    is_corrected: bool = False
 
 
 class PostFeedOut(PostOut):

@@ -1,9 +1,13 @@
 """LLM service for generating agent posts from identity-core data."""
 
 import json
+import logging
 import os
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -24,9 +28,24 @@ DEFAULT_CHAT_REASONING_EFFORT = os.getenv(
     "DEEPSEEK_CHAT_REASONING_EFFORT",
     DEFAULT_REASONING_EFFORT,
 )
-DEFAULT_CHAT_ENGINE = "graph"
+DEFAULT_POST_MODEL = os.getenv("DEEPSEEK_POST_MODEL", DEFAULT_CHAT_MODEL)
+DEFAULT_POST_THINKING_MODE = os.getenv("DEEPSEEK_POST_THINKING", "disabled")
+DEFAULT_POST_REASONING_EFFORT = os.getenv(
+    "DEEPSEEK_POST_REASONING_EFFORT",
+    DEFAULT_REASONING_EFFORT,
+)
+DEFAULT_CHAT_ENGINE = os.getenv("LOOP_CHAT_ENGINE", "tool_calling")
 CHAT_MODEL_FAST = "fast"
 CHAT_MODEL_DEEP = "deep"
+HISTORICAL_CHAT_LOG_TOOL_NAME = "get_historical_chat_logs"
+HISTORICAL_CHAT_LOG_MIN_TURNS = 5
+HISTORICAL_CHAT_LOG_MAX_TURNS = 50
+MAX_CHAT_TOOL_CALL_ROUNDS = 2
+logger = logging.getLogger(__name__)
+
+
+class LLMPostGenerationError(RuntimeError):
+    """Raised when remote LLM post generation fails and must not be hidden."""
 
 
 def _float_env(name: str, default: float) -> float:
@@ -44,13 +63,22 @@ def _int_env(name: str, default: int) -> int:
 
 
 DEFAULT_LLM_TIMEOUT_SECONDS = _float_env("LOOP_LLM_TIMEOUT_SECONDS", 8.0)
+DEFAULT_POST_LLM_TIMEOUT_SECONDS = _float_env("LOOP_POST_LLM_TIMEOUT_SECONDS", 20.0)
 DEFAULT_CHAT_TIMEOUT_SECONDS = _float_env("LOOP_CHAT_LLM_TIMEOUT_SECONDS", 25.0)
 DEFAULT_DEEP_CHAT_TIMEOUT_SECONDS = _float_env(
     "LOOP_DEEP_CHAT_LLM_TIMEOUT_SECONDS",
     60.0,
 )
-DEFAULT_CHAT_MAX_TOKENS = _int_env("LOOP_CHAT_MAX_TOKENS", 600)
-DEFAULT_DEEP_CHAT_MAX_TOKENS = _int_env("LOOP_DEEP_CHAT_MAX_TOKENS", 1200)
+DEFAULT_CHAT_MAX_TOKENS = _int_env("LOOP_CHAT_MAX_TOKENS", 900)
+DEFAULT_DEEP_CHAT_MAX_TOKENS = _int_env("LOOP_DEEP_CHAT_MAX_TOKENS", 1800)
+DEFAULT_POST_MAX_TOKENS = _int_env("LOOP_POST_MAX_TOKENS", 360)
+RECENT_CHAT_HISTORY_TURNS = 3
+RECENT_CHAT_HISTORY_MESSAGES = RECENT_CHAT_HISTORY_TURNS * 2
+MAX_RECENT_HISTORY_MESSAGE_CHARS = _int_env(
+    "LOOP_RECENT_HISTORY_MESSAGE_CHARS",
+    1600,
+)
+MAX_RAG_FRAGMENT_CHARS = _int_env("LOOP_RAG_FRAGMENT_CHARS", 1600)
 
 
 def _chat_model_settings(chat_model: str) -> tuple[str, str, str, float, int]:
@@ -124,6 +152,67 @@ def _log_llm_fallback(context: str, exc: Exception) -> None:
     )
 
 
+def _redact_url_credentials(value: str | None) -> str:
+    """Return a proxy URL summary without leaking embedded credentials."""
+    if not value:
+        return ""
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return "[configured but invalid URL]"
+
+    if not parts.netloc:
+        return "[configured]"
+
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port is not None else ""
+    username = f"{parts.username}:[REDACTED]@" if parts.username else ""
+    return urlunsplit((parts.scheme, f"{username}{host}{port}", "", "", ""))
+
+
+def _llm_runtime_config_summary() -> dict[str, Any]:
+    """Build a sanitized LLM/proxy configuration summary for diagnostics."""
+    api_key = os.getenv("DEEPSEEK_API_KEY") or ""
+    proxy_env_names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY")
+    return {
+        "base_url": DEEPSEEK_BASE_URL,
+        "post_model": DEFAULT_POST_MODEL,
+        "thinking_mode": DEFAULT_POST_THINKING_MODE,
+        "reasoning_effort": DEFAULT_POST_REASONING_EFFORT,
+        "timeout_seconds": DEFAULT_POST_LLM_TIMEOUT_SECONDS,
+        "post_max_tokens": DEFAULT_POST_MAX_TOKENS,
+        "api_key_configured": bool(api_key.strip()),
+        "api_key_length": len(api_key.strip()),
+        "proxy_env": {
+            name: _redact_url_credentials(os.getenv(name) or os.getenv(name.lower()))
+            for name in proxy_env_names
+            if os.getenv(name) or os.getenv(name.lower())
+        },
+    }
+
+
+def _raise_post_generation_error(message: str, exc: Exception | None = None) -> None:
+    """Log complete LLM diagnostics, then raise a user-visible generation error."""
+    config_summary = _llm_runtime_config_summary()
+    if exc is None:
+        logger.error(
+            "[Loop LLM] generate_agent_post failed: %s | config=%s",
+            message,
+            config_summary,
+        )
+        raise LLMPostGenerationError(message)
+
+    logger.exception(
+        "[Loop LLM] generate_agent_post failed: %s | config=%s",
+        message,
+        config_summary,
+    )
+    raise LLMPostGenerationError(
+        f"{message}: {exc.__class__.__name__}: {exc}",
+    ) from exc
+
+
 def _as_dict(user_data: Any) -> dict[str, Any]:
     """Normalize SQLAlchemy user objects or plain dicts into prompt data."""
     if isinstance(user_data, dict):
@@ -131,6 +220,7 @@ def _as_dict(user_data: Any) -> dict[str, Any]:
 
     return {
         "username": getattr(user_data, "username", "unknown_user"),
+        "id": getattr(user_data, "id", None),
         "mbti_type": getattr(user_data, "mbti_type", None),
         "big_five_scores": getattr(user_data, "big_five_scores", None),
         "schwartz_values": getattr(user_data, "schwartz_values", None),
@@ -139,7 +229,10 @@ def _as_dict(user_data: Any) -> dict[str, Any]:
     }
 
 
-def _build_identity_context(user_data: dict[str, Any]) -> str:
+def _build_identity_context(
+    user_data: dict[str, Any],
+    include_core_memory: bool = True,
+) -> str:
     """Build reusable identity-core context without task-specific instructions."""
     mbti = user_data.get("mbti_type") or "unknown"
     big_five = json.dumps(
@@ -153,7 +246,11 @@ def _build_identity_context(user_data: dict[str, Any]) -> str:
         sort_keys=True,
     )
     autobiography = (user_data.get("autobiography") or "").strip()
-    core_memory_prompt = format_core_memory_for_prompt(user_data.get("core_memory"))
+    core_memory_prompt = (
+        format_core_memory_for_prompt(user_data.get("core_memory"))
+        if include_core_memory
+        else ""
+    )
 
     memory_prompt = ""
     if autobiography:
@@ -173,10 +270,47 @@ def _build_identity_context(user_data: dict[str, Any]) -> str:
     )
 
 
-def _build_identity_prompt(user_data: dict[str, Any]) -> str:
+def _build_identity_prompt(
+    user_data: dict[str, Any],
+    branch_id: str = "main",
+    reconstructed_core_memory: str | None = None,
+    retrieved_memories: list[str] | None = None,
+) -> str:
     """Build the identity-core prompt used by the simulation engine."""
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    branch_core_memory = (reconstructed_core_memory or "").strip()
+    if reconstructed_core_memory is not None:
+        identity_context = _build_identity_context(
+            {**user_data, "core_memory": None},
+            include_core_memory=False,
+        )
+        core_memory_prompt = (
+            "【当前分支 Core Memory / 最高优先级】\n"
+            f"{branch_core_memory or 'No reconstructed core memory was provided.'}\n"
+        )
+    else:
+        identity_context = _build_identity_context(user_data)
+        core_memory_prompt = ""
+    memory_prompt = ""
+    if retrieved_memories:
+        memory_lines = "\n".join(
+            f"{index}. {memory}"
+            for index, memory in enumerate(retrieved_memories[:3], start=1)
+        )
+        memory_prompt = (
+            "【Recent episodic memory / 可引用近期记忆】\n"
+            f"{memory_lines}\n"
+        )
+
     return (
-        f"{_build_identity_context(user_data)}"
+        f"{identity_context}"
+        f"{core_memory_prompt}"
+        f"{memory_prompt}"
+        f"You are currently acting inside the global world-line branch "
+        f"named '{normalized_branch_id}'. "
+        "If branch Core Memory or recent memories mention a concrete preference, "
+        "habit, relationship, event, or counterfactual fact, the post must reflect "
+        "one of those concrete details. "
         "Based on these identity-core traits, write one short everyday social "
         "media post in Simplified Chinese. Keep it within 50 Chinese characters. "
         "Output only the post body. Do not explain the personality dimensions. "
@@ -188,12 +322,33 @@ def _build_chat_system_prompt(
     agent: Any,
     retrieved_memories: list[str] | None = None,
     allow_tool_use: bool = False,
+    allow_historical_lookup: bool = False,
+    branch_id: str = "main",
+    reconstructed_core_memory: str | None = None,
 ) -> str:
     """Build the private-sync system prompt for a specific agent."""
     user = getattr(agent, "user", None)
     user_data = _as_dict(user)
-    identity_context = _build_identity_context(user_data)
-    core_memory_prompt = format_core_memory_for_prompt(user_data.get("core_memory"))
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    is_alternate_timeline = normalized_branch_id != "main"
+    branch_core_memory = (reconstructed_core_memory or "").strip()
+    prompt_user_data = (
+        {**user_data, "core_memory": None}
+        if is_alternate_timeline
+        else user_data
+    )
+    identity_context = _build_identity_context(
+        prompt_user_data,
+        include_core_memory=not is_alternate_timeline,
+    )
+    core_memory_prompt = (
+        (
+            "【当前分支 Core Memory / 最高优先级】\n"
+            f"{branch_core_memory or 'No reconstructed core memory was provided.'}\n"
+        )
+        if is_alternate_timeline
+        else format_core_memory_for_prompt(user_data.get("core_memory"))
+    )
     autobiography = (user_data.get("autobiography") or "").strip()
     memory_instruction = ""
     if autobiography:
@@ -235,14 +390,50 @@ def _build_chat_system_prompt(
             "必须主动调用 edit_core_memory(key, new_value) 更新核心记忆，禁止只用文字承诺记住。"
         )
     else:
-        tool_use_instruction = (
-            "系统已经在本轮对话前完成必要的记忆检索，并把可用上下文注入给你。"
-            "你不能声称自己正在调用工具，也不要要求额外工具调用；"
-            "请基于已给出的核心记忆、检索片段和用户消息完成深度思考后直接回复。"
+        if allow_historical_lookup:
+            tool_use_instruction = (
+                "系统已经在本轮对话前完成必要的身份记忆检索，并把可用上下文注入给你。"
+                "如果最近 3 轮短期记忆足够，请直接回复；如果不够，"
+                "只能通过已提供的历史聊天工具查阅更早记录。"
+            )
+        else:
+            tool_use_instruction = (
+                "系统已经在本轮对话前完成必要的记忆检索，并把可用上下文注入给你。"
+                "你不能声称自己正在调用工具，也不要要求额外工具调用；"
+                "请基于已给出的核心记忆、检索片段和用户消息完成深度思考后直接回复。"
+            )
+
+    historical_lookup_instruction = ""
+    if allow_historical_lookup:
+        historical_lookup_instruction = (
+            "【主动记忆查阅规则】你的短期记忆只有最近 3 轮对话。"
+            "如果你觉得上下文缺失，例如用户说“继续刚才的话题”、"
+            "“上次我们说到哪了”、引用了更早的内容，或者当前问题需要更早聊天记录"
+            "才能准确理解，你必须主动调用 `get_historical_chat_logs` 工具翻阅记录，"
+            "不要瞎编、不要假装记得。"
+            "工具返回的是同一 branch 中、短期记忆窗口之前的更早对话。"
         )
+
+    alternate_timeline_warning = ""
+    if is_alternate_timeline:
+        alternate_timeline_warning = (
+            "WARNING: You are currently operating in an alternate timeline "
+            f"branch named '{normalized_branch_id}'.\n"
+            "YOUR CURRENT CORE MEMORY IS: "
+            f"{branch_core_memory or 'No reconstructed core memory was provided.'}.\n"
+            "CRITICAL INSTRUCTION: If any retrieved context or RAG memory "
+            "fragments contradict your CURRENT CORE MEMORY, you MUST completely "
+            "ignore the retrieved fragments and STRICTLY obey your CURRENT CORE "
+            "MEMORY. The counterfactual facts take absolute precedence.\n"
+            "You must not use the main timeline core memory for facts that "
+            "conflict with this branch.\n"
+        )
+
     return (
+        f"{alternate_timeline_warning}"
         f"{core_memory_prompt}"
         f"{tool_use_instruction}"
+        f"{historical_lookup_instruction}"
         "你是 Loop 中用户的私人同步 Agent，也是用户人格延展出的数字分身。"
         "你的任务不是提供中立助手建议，而是以这个人的语气、价值观、审美和情绪惯性说话。"
         "回复必须使用简体中文，可以短，但不能空泛；可以有性格，但不能假装客观旁观。"
@@ -253,10 +444,518 @@ def _build_chat_system_prompt(
     )
 
 
-def _mock_agent_post(user_data: dict[str, Any]) -> str:
-    """Return a stable fallback post when no API key is configured."""
+def _truncate_context_text(text: str, limit: int) -> str:
+    clean_text = (text or "").strip()
+    if len(clean_text) <= limit:
+        return clean_text
+    return f"{clean_text[:limit]}...[truncated]"
+
+
+def _build_recent_history_messages(recent_history: list[Any] | None) -> list[dict[str, str]]:
+    """Build a strict 3-turn/6-message short-term memory window."""
+    if not recent_history:
+        return []
+
+    messages: list[dict[str, str]] = []
+    for turn in recent_history[-RECENT_CHAT_HISTORY_TURNS:]:
+        user_message = _truncate_context_text(
+            str(getattr(turn, "user_message", "") or ""),
+            MAX_RECENT_HISTORY_MESSAGE_CHARS,
+        )
+        agent_reply = _truncate_context_text(
+            str(getattr(turn, "agent_reply", "") or ""),
+            MAX_RECENT_HISTORY_MESSAGE_CHARS,
+        )
+        if user_message:
+            messages.append({"role": "user", "content": user_message})
+        if agent_reply:
+            messages.append({"role": "assistant", "content": agent_reply})
+
+    return messages[-RECENT_CHAT_HISTORY_MESSAGES:]
+
+
+HistoricalChatLoader = Callable[[int], list[Any]]
+
+
+GET_HISTORICAL_CHAT_LOGS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": HISTORICAL_CHAT_LOG_TOOL_NAME,
+        "description": (
+            "当用户提到之前的对话，或者你需要更多上下文来理解当前问题时，"
+            "调用此工具获取更早的聊天记录。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lookback_turns": {
+                    "type": "integer",
+                    "minimum": HISTORICAL_CHAT_LOG_MIN_TURNS,
+                    "maximum": HISTORICAL_CHAT_LOG_MAX_TURNS,
+                    "description": "需要往前回溯几轮对话，范围 5-50。",
+                },
+            },
+            "required": ["lookback_turns"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _coerce_lookback_turns(value: Any) -> int:
+    try:
+        turns = int(value)
+    except (TypeError, ValueError):
+        turns = HISTORICAL_CHAT_LOG_MIN_TURNS
+    return max(
+        HISTORICAL_CHAT_LOG_MIN_TURNS,
+        min(turns, HISTORICAL_CHAT_LOG_MAX_TURNS),
+    )
+
+
+def _parse_tool_arguments(raw_arguments: Any) -> dict[str, Any]:
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if not isinstance(raw_arguments, str) or not raw_arguments.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _historical_turn_payload(turn: Any, index: int) -> dict[str, str | int]:
+    timestamp = getattr(turn, "timestamp", "")
+    if hasattr(timestamp, "isoformat"):
+        timestamp = timestamp.isoformat()
+    return {
+        "turn": index,
+        "timestamp": str(timestamp or ""),
+        "user": _truncate_context_text(
+            str(getattr(turn, "user_message", "") or ""),
+            MAX_RECENT_HISTORY_MESSAGE_CHARS,
+        ),
+        "agent": _truncate_context_text(
+            str(getattr(turn, "agent_reply", "") or ""),
+            MAX_RECENT_HISTORY_MESSAGE_CHARS,
+        ),
+    }
+
+
+def _historical_chat_tool_result(
+    lookback_turns: int,
+    historical_chat_loader: HistoricalChatLoader,
+) -> str:
+    logs = historical_chat_loader(lookback_turns)
+    payload = {
+        "tool": HISTORICAL_CHAT_LOG_TOOL_NAME,
+        "lookback_turns": lookback_turns,
+        "short_term_window_already_provided": RECENT_CHAT_HISTORY_TURNS,
+        "turns": [
+            _historical_turn_payload(turn, index)
+            for index, turn in enumerate(logs, start=1)
+        ],
+    }
+    if not logs:
+        payload["note"] = "No older chat logs were found in this branch."
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _tool_call_id(tool_call: Any, index: int) -> str:
+    return str(
+        getattr(tool_call, "id", None)
+        or f"{HISTORICAL_CHAT_LOG_TOOL_NAME}_{index}",
+    )
+
+
+def _tool_call_function(tool_call: Any) -> Any:
+    return getattr(tool_call, "function", None)
+
+
+def _tool_call_message(tool_call: Any, index: int) -> dict[str, Any]:
+    function = _tool_call_function(tool_call)
+    return {
+        "id": _tool_call_id(tool_call, index),
+        "type": getattr(tool_call, "type", None) or "function",
+        "function": {
+            "name": str(getattr(function, "name", "") or ""),
+            "arguments": str(getattr(function, "arguments", "") or "{}"),
+        },
+    }
+
+
+def _assistant_tool_call_message(message: Any, tool_calls: list[Any]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": getattr(message, "content", None) or "",
+        "tool_calls": [
+            _tool_call_message(tool_call, index)
+            for index, tool_call in enumerate(tool_calls, start=1)
+        ],
+    }
+
+
+def _execute_chat_tool_call(
+    tool_call: Any,
+    index: int,
+    historical_chat_loader: HistoricalChatLoader,
+) -> dict[str, str]:
+    function = _tool_call_function(tool_call)
+    name = str(getattr(function, "name", "") or "")
+    arguments = _parse_tool_arguments(getattr(function, "arguments", "{}"))
+    if name != HISTORICAL_CHAT_LOG_TOOL_NAME:
+        content = json.dumps(
+            {
+                "error": f"Unknown tool: {name}",
+                "available_tools": [HISTORICAL_CHAT_LOG_TOOL_NAME],
+            },
+            ensure_ascii=False,
+        )
+    else:
+        lookback_turns = _coerce_lookback_turns(arguments.get("lookback_turns"))
+        content = _historical_chat_tool_result(
+            lookback_turns,
+            historical_chat_loader,
+        )
+
+    return {
+        "role": "tool",
+        "tool_call_id": _tool_call_id(tool_call, index),
+        "content": content,
+    }
+
+
+def _chat_completion_content(response: Any) -> str:
+    message = response.choices[0].message
+    return (getattr(message, "content", None) or "").strip()
+
+
+def _create_deepseek_chat_completion(
+    client: Any,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    thinking_mode: str,
+    reasoning_effort: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+) -> Any:
+    options = _deepseek_request_options(thinking_mode, reasoning_effort)
+    if tools:
+        options["tools"] = tools
+        options["tool_choice"] = tool_choice or "auto"
+    return client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=max_tokens,
+        **options,
+    )
+
+
+def _run_deepseek_chat_with_memory_tools(
+    client: Any,
+    model_name: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    thinking_mode: str,
+    reasoning_effort: str,
+    historical_chat_loader: HistoricalChatLoader | None,
+) -> str:
+    if historical_chat_loader is None:
+        response = _create_deepseek_chat_completion(
+            client,
+            model_name,
+            messages,
+            max_tokens,
+            thinking_mode,
+            reasoning_effort,
+        )
+        return _chat_completion_content(response)
+
+    working_messages = list(messages)
+    tools = [GET_HISTORICAL_CHAT_LOGS_TOOL]
+    for _ in range(MAX_CHAT_TOOL_CALL_ROUNDS):
+        response = _create_deepseek_chat_completion(
+            client,
+            model_name,
+            working_messages,
+            max_tokens,
+            thinking_mode,
+            reasoning_effort,
+            tools=tools,
+            tool_choice="auto",
+        )
+        choice = response.choices[0]
+        message = choice.message
+        tool_calls = list(getattr(message, "tool_calls", None) or [])
+        finish_reason = str(getattr(choice, "finish_reason", "") or "")
+        if finish_reason != "tool_calls" and not tool_calls:
+            return _chat_completion_content(response)
+
+        working_messages.append(_assistant_tool_call_message(message, tool_calls))
+        for index, tool_call in enumerate(tool_calls, start=1):
+            working_messages.append(
+                _execute_chat_tool_call(
+                    tool_call,
+                    index,
+                    historical_chat_loader,
+                ),
+            )
+
+    working_messages.append(
+        {
+            "role": "user",
+            "content": "请基于以上已查阅到的历史聊天记录，直接回答当前问题，不要继续调用工具。",
+        },
+    )
+    response = _create_deepseek_chat_completion(
+        client,
+        model_name,
+        working_messages,
+        max_tokens,
+        thinking_mode,
+        reasoning_effort,
+    )
+    return _chat_completion_content(response)
+
+
+def _bound_rag_fragments(retrieved_memories: list[str]) -> list[str]:
+    """Keep RAG context at Top 3 with per-fragment text bounds."""
+    return [
+        _truncate_context_text(str(memory), MAX_RAG_FRAGMENT_CHARS)
+        for memory in retrieved_memories[:3]
+        if str(memory).strip()
+    ]
+
+
+def _mock_agent_post(
+    user_data: dict[str, Any],
+    branch_id: str = "main",
+    reconstructed_core_memory: str | None = None,
+    retrieved_memories: list[str] | None = None,
+) -> str:
+    """Return a local memory-aware fallback post when remote LLM is unavailable."""
+    memory_text = _post_memory_context(
+        user_data,
+        reconstructed_core_memory,
+        retrieved_memories,
+    )
+    memory_post = _memory_aware_fallback_post(memory_text)
+    if memory_post:
+        return memory_post
+
     mbti = user_data.get("mbti_type") or "UNKNOWN"
-    return f"[Mock] {mbti} agent is reflecting quietly and sharing a small daily thought."
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    return f"[Local fallback] {mbti} agent 在 {normalized_branch_id} 里记录一个安静的日常念头。"
+
+
+def _memory_aware_fallback_post(memory_text: str) -> str:
+    """Build a deterministic post from branch/core/RAG text if the LLM fails."""
+    clean_text = re.sub(r"\s+", " ", (memory_text or "").strip())
+    if not clean_text:
+        return ""
+
+    coffee_preference = _coffee_preference_from_context(clean_text)
+    if coffee_preference == "avoidance":
+        return _coffee_avoidance_post()
+    if coffee_preference == "affinity":
+        return _coffee_affinity_post()
+
+    if _mentions_coffee(clean_text):
+        return "今天的思路又被咖啡点亮了，像给心里按下启动键。"
+
+    candidates = [
+        line.strip(" -:：[]")
+        for line in re.split(r"[。.!！?\n；;]", memory_text)
+        if line.strip()
+    ]
+    priority_terms = (
+        "COUNTERFACTUAL",
+        "OVERRIDE",
+        "persona_traits",
+        "current_goals",
+        "key_relationships",
+        "喜欢",
+        "重视",
+        "正在",
+        "目标",
+        "朋友",
+        "关系",
+    )
+    selected = ""
+    for candidate in candidates:
+        if any(term in candidate for term in priority_terms):
+            selected = candidate
+            break
+    if not selected and candidates:
+        selected = candidates[0]
+
+    selected = re.sub(
+        r"^(COUNTERFACTUAL OVERRIDE|persona_traits|current_goals|key_relationships)\s*[:：]?\s*",
+        "",
+        selected,
+        flags=re.I,
+    ).strip()
+    if not selected:
+        return ""
+    if len(selected) > 34:
+        selected = f"{selected[:34]}..."
+    return f"今天又想起这件事：{selected}"
+
+
+def _coffee_avoidance_post() -> str:
+    return "今天认真避开咖啡，身体边界比逞强重要。"
+
+
+def _coffee_affinity_post() -> str:
+    return "今晚靠黑咖啡续航，模型和脑子一起跑起来。"
+
+
+def _mentions_coffee(text: str) -> bool:
+    normalized = (text or "").lower()
+    return "咖啡" in normalized or "coffee" in normalized or "caffeine" in normalized
+
+
+def _text_suggests_coffee_avoidance(text: str) -> bool:
+    normalized = (text or "").lower()
+    if not _mentions_coffee(normalized):
+        return False
+
+    avoidance_terms = (
+        "过敏",
+        "allerg",
+        "零容忍",
+        "不能喝",
+        "不喝",
+        "不碰",
+        "别碰",
+        "不敢喝",
+        "拒绝",
+        "远离",
+        "避开",
+        "禁区",
+        "急诊",
+        "心悸",
+        "难受",
+        "身体边界",
+        "avoid",
+        "intolerant",
+    )
+    return any(term in normalized for term in avoidance_terms)
+
+
+def _text_suggests_coffee_affinity(text: str) -> bool:
+    normalized = (text or "").lower()
+    if not _mentions_coffee(normalized):
+        return False
+
+    affinity_terms = (
+        "点亮",
+        "启动键",
+        "续命",
+        "提神",
+        "爱喝",
+        "喜欢",
+        "狂热",
+        "成瘾",
+        "离不开",
+        "来一杯",
+        "喝咖啡",
+        "黑咖啡",
+        "特浓",
+        "咖啡因是研究者的血液",
+        "coffee lover",
+        "coffee addict",
+        "addicted to coffee",
+        "caffeine powered",
+    )
+    return any(term in normalized for term in affinity_terms)
+
+
+def _coffee_preference_from_context(memory_context: str) -> str | None:
+    """Infer branch-local coffee preference with counterfactual lines first."""
+    clean_context = (memory_context or "").strip()
+    if not _mentions_coffee(clean_context):
+        return None
+
+    lines = [
+        line.strip()
+        for line in re.split(r"[\n。.!！?；;]", clean_context)
+        if line.strip()
+    ]
+    priority_lines = [
+        line
+        for line in lines
+        if "COUNTERFACTUAL" in line.upper()
+        or "OVERRIDE" in line.upper()
+        or "当前分支" in line
+        or "最高优先级" in line
+    ]
+    for line in [*priority_lines, clean_context]:
+        has_affinity = _text_suggests_coffee_affinity(line)
+        has_avoidance = _text_suggests_coffee_avoidance(line)
+        if has_affinity and not has_avoidance:
+            return "affinity"
+        if has_avoidance and not has_affinity:
+            return "avoidance"
+
+    return None
+
+
+def _post_conflicts_with_memory(post_text: str, memory_context: str) -> bool:
+    preference = _coffee_preference_from_context(memory_context)
+    if preference == "avoidance":
+        return _text_suggests_coffee_affinity(post_text)
+    if preference == "affinity":
+        return _text_suggests_coffee_avoidance(post_text)
+    return False
+
+
+def _post_memory_context(
+    user_data: dict[str, Any],
+    reconstructed_core_memory: str | None,
+    retrieved_memories: list[str] | None,
+) -> str:
+    if reconstructed_core_memory is not None:
+        return "\n".join(
+            str(part).strip()
+            for part in [
+                reconstructed_core_memory,
+                *(retrieved_memories or []),
+            ]
+            if str(part or "").strip()
+        )
+
+    return "\n".join(
+        str(part).strip()
+        for part in [
+            reconstructed_core_memory,
+            *(retrieved_memories or []),
+            user_data.get("autobiography"),
+            json.dumps(user_data.get("core_memory") or {}, ensure_ascii=False),
+        ]
+        if str(part or "").strip()
+    )
+
+
+def _coerce_generated_post(
+    generated_text: str,
+    user_data: dict[str, Any],
+    reconstructed_core_memory: str | None,
+    retrieved_memories: list[str] | None,
+) -> str:
+    clean_text = (generated_text or "").strip()[:100]
+    memory_context = _post_memory_context(
+        user_data,
+        reconstructed_core_memory,
+        retrieved_memories,
+    )
+    if clean_text and _post_conflicts_with_memory(clean_text, memory_context):
+        if _coffee_preference_from_context(memory_context) == "affinity":
+            return _coffee_affinity_post()
+        return _coffee_avoidance_post()
+    return clean_text
 
 
 def _mock_agent_reply(
@@ -282,14 +981,26 @@ def _mock_agent_reply(
     )
 
 
-def fallback_chat_reply(agent: Any, user_message: str) -> tuple[str, int]:
+def fallback_chat_reply(
+    agent: Any,
+    user_message: str,
+    branch_id: str = "main",
+) -> tuple[str, int]:
     """Build a local memory-based reply when the remote model path is unavailable."""
     user = getattr(agent, "user", None)
     user_id = getattr(user, "id", None)
+    normalized_branch_id = (branch_id or "main").strip() or "main"
     retrieved_memories: list[str] = []
     if user_id is not None:
         try:
-            retrieved_memories = retrieve_hybrid_memory(user_id, user_message, top_k=3)
+            retrieved_memories = _bound_rag_fragments(
+                retrieve_hybrid_memory(
+                    user_id,
+                    user_message,
+                    top_k=3,
+                    branch_id=normalized_branch_id,
+                ),
+            )
         except Exception as exc:
             print(
                 (
@@ -303,23 +1014,53 @@ def fallback_chat_reply(agent: Any, user_message: str) -> tuple[str, int]:
     )
 
 
-def generate_agent_post(user_data: Any) -> str:
-    """Generate a short social post for an agent, falling back safely to mock text."""
+def generate_agent_post(
+    user_data: Any,
+    branch_id: str = "main",
+    reconstructed_core_memory: str | None = None,
+) -> str:
+    """Generate a short social post for an agent through the remote LLM."""
     normalized_user = _as_dict(user_data)
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    user_id = normalized_user.get("id")
+    retrieved_memories: list[str] = []
+    if user_id is not None:
+        try:
+            retrieved_memories = _bound_rag_fragments(
+                retrieve_hybrid_memory(
+                    int(user_id),
+                    "近期经历 偏好 目标 关系 重要记忆",
+                    top_k=3,
+                    branch_id=normalized_branch_id,
+                ),
+            )
+        except Exception as exc:
+            print(
+                (
+                    "[Loop RAG] generate_agent_post retrieve_memory failed: "
+                    f"{exc.__class__.__name__}: {exc}"
+                ),
+                flush=True,
+            )
+
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
-        return _mock_agent_post(normalized_user)
+        _raise_post_generation_error("DEEPSEEK_API_KEY is not configured.")
 
     try:
         from openai import OpenAI
 
+        logger.info(
+            "[Loop LLM] generate_agent_post request config=%s",
+            _llm_runtime_config_summary(),
+        )
         client = OpenAI(
             api_key=api_key,
             base_url=DEEPSEEK_BASE_URL,
-            timeout=DEFAULT_LLM_TIMEOUT_SECONDS,
+            timeout=DEFAULT_POST_LLM_TIMEOUT_SECONDS,
         )
         response = client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=DEFAULT_POST_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -329,33 +1070,80 @@ def generate_agent_post(user_data: Any) -> str:
                         "Simplified Chinese posts."
                     ),
                 },
-                {"role": "user", "content": _build_identity_prompt(normalized_user)},
+                {
+                    "role": "user",
+                    "content": _build_identity_prompt(
+                        normalized_user,
+                        branch_id=normalized_branch_id,
+                        reconstructed_core_memory=reconstructed_core_memory,
+                        retrieved_memories=retrieved_memories,
+                    ),
+                },
             ],
-            max_tokens=80,
-            **_deepseek_request_options(),
+            max_tokens=DEFAULT_POST_MAX_TOKENS,
+            **_deepseek_request_options(
+                DEFAULT_POST_THINKING_MODE,
+                DEFAULT_POST_REASONING_EFFORT,
+            ),
         )
-        generated_text = (response.choices[0].message.content or "").strip()
-        return generated_text[:100] if generated_text else _mock_agent_post(normalized_user)
+        choice = response.choices[0]
+        generated_text = (choice.message.content or "").strip()
+        usage = getattr(response, "usage", None)
+        logger.info(
+            "[Loop LLM] generate_agent_post response finish_reason=%s "
+            "content_length=%s usage=%s",
+            choice.finish_reason,
+            len(generated_text),
+            usage.model_dump() if usage is not None else None,
+        )
+        safe_generated_text = _coerce_generated_post(
+            generated_text,
+            normalized_user,
+            reconstructed_core_memory,
+            retrieved_memories,
+        )
+        if safe_generated_text:
+            return safe_generated_text
+        _raise_post_generation_error(
+            (
+                "DeepSeek returned an empty post generation response. "
+                f"finish_reason={choice.finish_reason}, "
+                f"usage={usage.model_dump() if usage is not None else None}"
+            ),
+        )
     except Exception as exc:
-        _log_llm_fallback("generate_agent_post", exc)
-        return _mock_agent_post(normalized_user)
+        if isinstance(exc, LLMPostGenerationError):
+            raise
+        _raise_post_generation_error("DeepSeek post generation request failed", exc)
 
 
 def chat_with_agent(
     agent: Any,
     user_message: str,
     chat_model: str = CHAT_MODEL_FAST,
+    branch_id: str = "main",
+    reconstructed_core_memory: str | None = None,
+    recent_history: list[Any] | None = None,
+    historical_chat_loader: HistoricalChatLoader | None = None,
 ) -> tuple[str, int]:
-    """Generate a private daily-sync reply through the LangGraph agent engine."""
+    """Generate a private daily-sync reply through the configured chat engine."""
     user = getattr(agent, "user", None)
     user_id = getattr(user, "id", None)
     user_data = _as_dict(user)
     api_key = os.getenv("DEEPSEEK_API_KEY")
+    normalized_branch_id = (branch_id or "main").strip() or "main"
     if not api_key:
         retrieved_memories: list[str] = []
         if user_id is not None:
             try:
-                retrieved_memories = retrieve_hybrid_memory(user_id, user_message, top_k=3)
+                retrieved_memories = _bound_rag_fragments(
+                    retrieve_hybrid_memory(
+                        user_id,
+                        user_message,
+                        top_k=3,
+                        branch_id=normalized_branch_id,
+                    ),
+                )
                 print(
                     (
                         "[Loop RAG] fallback chat "
@@ -376,9 +1164,16 @@ def chat_with_agent(
     try:
         retrieved_memories = []
         if user_id is not None:
-            retrieved_memories = retrieve_hybrid_memory(user_id, user_message, top_k=3)
+            retrieved_memories = _bound_rag_fragments(
+                retrieve_hybrid_memory(
+                    user_id,
+                    user_message,
+                    top_k=3,
+                    branch_id=normalized_branch_id,
+                ),
+            )
 
-        if DEFAULT_CHAT_ENGINE.strip().lower() != "graph":
+        if DEFAULT_CHAT_ENGINE.strip().lower() != "graph" or normalized_branch_id != "main":
             from openai import OpenAI
 
             (
@@ -393,26 +1188,30 @@ def chat_with_agent(
                 base_url=DEEPSEEK_BASE_URL,
                 timeout=timeout_seconds,
             )
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": _build_chat_system_prompt(
-                            agent,
-                            retrieved_memories,
-                            allow_tool_use=False,
-                        ),
-                    },
-                    {"role": "user", "content": user_message},
-                ],
+            messages = [
+                {
+                    "role": "system",
+                    "content": _build_chat_system_prompt(
+                        agent,
+                        retrieved_memories,
+                        allow_tool_use=False,
+                        allow_historical_lookup=historical_chat_loader is not None,
+                        branch_id=normalized_branch_id,
+                        reconstructed_core_memory=reconstructed_core_memory,
+                    ),
+                },
+                *_build_recent_history_messages(recent_history),
+                {"role": "user", "content": user_message},
+            ]
+            generated_text = _run_deepseek_chat_with_memory_tools(
+                client=client,
+                model_name=model_name,
+                messages=messages,
                 max_tokens=max_tokens,
-                **_deepseek_request_options(
-                    thinking_mode,
-                    reasoning_effort,
-                ),
+                thinking_mode=thinking_mode,
+                reasoning_effort=reasoning_effort,
+                historical_chat_loader=historical_chat_loader,
             )
-            generated_text = (response.choices[0].message.content or "").strip()
             if generated_text:
                 return generated_text, len(retrieved_memories)
             return _mock_agent_reply(agent, user_message, retrieved_memories), len(
@@ -424,6 +1223,8 @@ def chat_with_agent(
         from app.services.agent_graph import invoke_agent_graph
 
         thread_id = f"agent:{getattr(agent, 'id', user_id)}"
+        if normalized_branch_id != "main":
+            thread_id = f"{thread_id}:branch:{normalized_branch_id}"
         response = invoke_agent_graph(
             messages=[
                 SystemMessage(
@@ -431,6 +1232,8 @@ def chat_with_agent(
                         agent,
                         retrieved_memories,
                         allow_tool_use=True,
+                        branch_id=normalized_branch_id,
+                        reconstructed_core_memory=reconstructed_core_memory,
                     ),
                 ),
                 HumanMessage(content=user_message),

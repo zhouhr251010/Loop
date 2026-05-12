@@ -17,6 +17,7 @@ from app import models
 from app.database import SessionLocal
 from app.models import utc_now_seconds
 from app.services.core_memory_service import merge_core_memory_insight
+from app.services.event_store import append_event
 from app.services.rag_service import add_scored_memories
 
 
@@ -28,28 +29,69 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEFAULT_THINKING_MODE = os.getenv("DEEPSEEK_THINKING", "enabled")
 DEFAULT_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "high")
+DEFAULT_CONSOLIDATION_MODEL = os.getenv("DEEPSEEK_CONSOLIDATION_MODEL", DEFAULT_MODEL)
+DEFAULT_CONSOLIDATION_THINKING_MODE = os.getenv(
+    "DEEPSEEK_CONSOLIDATION_THINKING",
+    "disabled",
+)
+DEFAULT_CONSOLIDATION_REASONING_EFFORT = os.getenv(
+    "DEEPSEEK_CONSOLIDATION_REASONING_EFFORT",
+    DEFAULT_REASONING_EFFORT,
+)
 REFLECTION_BATCH_SIZE = 5
+DAILY_CHAT_LOG_LIMIT = 120
+DAILY_OWN_POST_LIMIT = 80
+DAILY_RECORD_PROMPT_LIMIT = 120
+MAX_DAILY_RECORD_CHARS = 1000
 
 
 def _deepseek_extra_body() -> dict[str, dict[str, str]]:
-    thinking_mode = DEFAULT_THINKING_MODE.strip().lower() or "disabled"
+    thinking_mode = DEFAULT_CONSOLIDATION_THINKING_MODE.strip().lower() or "disabled"
     if thinking_mode not in {"enabled", "disabled"}:
         thinking_mode = "disabled"
+    if thinking_mode == "disabled":
+        return {}
     return {"thinking": {"type": thinking_mode}}
 
 
 def _deepseek_reasoning_effort() -> str | None:
-    if (_deepseek_extra_body()["thinking"]["type"]) != "enabled":
+    extra_body = _deepseek_extra_body()
+    if not extra_body or extra_body["thinking"]["type"] != "enabled":
         return None
 
-    effort = DEFAULT_REASONING_EFFORT.strip().lower() or "high"
+    effort = DEFAULT_CONSOLIDATION_REASONING_EFFORT.strip().lower() or "high"
     return effort if effort in {"high", "max"} else "high"
+
+
+def _deepseek_request_options() -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    extra_body = _deepseek_extra_body()
+    if extra_body:
+        options["extra_body"] = extra_body
+    reasoning_effort = _deepseek_reasoning_effort()
+    if reasoning_effort:
+        options["reasoning_effort"] = reasoning_effort
+    return options
 
 
 def _format_timestamp(value) -> str:
     if value is None:
         return "未知时间"
     return value.isoformat(sep=" ", timespec="seconds")
+
+
+def _truncate_daily_record(value: str) -> str:
+    clean_value = (value or "").strip()
+    if len(clean_value) <= MAX_DAILY_RECORD_CHARS:
+        return clean_value
+    return f"{clean_value[:MAX_DAILY_RECORD_CHARS]}...[truncated]"
+
+
+def _records_for_prompt(records: list[str]) -> list[str]:
+    return [
+        _truncate_daily_record(record)
+        for record in records[-DAILY_RECORD_PROMPT_LIMIT:]
+    ]
 
 
 def _collect_daily_records(
@@ -65,18 +107,22 @@ def _collect_daily_records(
             models.ChatLog.agent_id == source_agent.id,
             models.ChatLog.timestamp >= since,
         )
-        .order_by(models.ChatLog.timestamp.asc(), models.ChatLog.id.asc())
+        .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
+        .limit(DAILY_CHAT_LOG_LIMIT)
         .all()
     )
+    chat_logs = list(reversed(chat_logs))
     own_posts = (
         db.query(models.Post)
         .filter(
             models.Post.agent_id == source_agent.id,
             models.Post.timestamp >= since,
         )
-        .order_by(models.Post.timestamp.asc(), models.Post.id.asc())
+        .order_by(models.Post.timestamp.desc(), models.Post.id.desc())
+        .limit(DAILY_OWN_POST_LIMIT)
         .all()
     )
+    own_posts = list(reversed(own_posts))
     visible_posts = (
         db.query(models.Post)
         .join(models.Agent)
@@ -92,6 +138,7 @@ def _collect_daily_records(
         db.query(models.Agent)
         .filter(models.Agent.id != source_agent.id)
         .order_by(models.Agent.id.asc())
+        .limit(100)
         .all()
     )
 
@@ -177,14 +224,13 @@ def _call_deepseek_json(
             timeout=30.0,
         )
         response = client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=DEFAULT_CONSOLIDATION_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=max_tokens,
-            extra_body=_deepseek_extra_body(),
-            reasoning_effort=_deepseek_reasoning_effort(),
+            **_deepseek_request_options(),
         )
         return response.choices[0].message.content or ""
     except Exception:
@@ -199,7 +245,7 @@ def _score_episodic_memories(
     if not records:
         return []
 
-    record_text = "\n".join(records[-120:])
+    record_text = "\n".join(_records_for_prompt(records))
     prompt = (
         "你是 Loop 的情景记忆筛选器。请从 Memory Stream 中生成适合长期情景记忆的条目。"
         "每个条目必须包含 text, similarity, importance, time_decay。"
@@ -214,7 +260,7 @@ def _score_episodic_memories(
     raw_text = _call_deepseek_json(
         "你只输出 JSON 数组。",
         prompt,
-        max_tokens=900,
+        max_tokens=1400,
     )
     scored_memories: list[dict[str, Any]] = []
     for item in _extract_json_array(raw_text):
@@ -265,7 +311,7 @@ def _extract_graph_triples(
         f"- target_agent_id={agent.id}, entity={agent.agent_name}"
         for agent in candidate_agents
     )
-    record_text = "\n".join(records[-120:])
+    record_text = "\n".join(_records_for_prompt(records))
     prompt = (
         "你是 GraphRAG 社交知识图谱抽取器。"
         "请从对话/帖子记录中抽取重要实体关系三元组。"
@@ -285,7 +331,7 @@ def _extract_graph_triples(
     raw_text = _call_deepseek_json(
         "你只输出 JSON 数组，不解释。",
         prompt,
-        max_tokens=900,
+        max_tokens=1400,
     )
     allowed_targets = {agent.id for agent in candidate_agents}
     triples: list[dict[str, Any]] = []
@@ -328,7 +374,7 @@ def _analyze_relationship_changes(
         f"- target_agent_id={agent.id}, agent_name={agent.agent_name}"
         for agent in candidate_agents
     )
-    record_text = "\n".join(records[-120:])
+    record_text = "\n".join(_records_for_prompt(records))
     prompt = (
         "请分析以下交互记录，评估该 Agent 对其他特定人物的情感变化。"
         "只允许引用候选目标列表中的 target_agent_id。"
@@ -352,7 +398,7 @@ def _analyze_relationship_changes(
             timeout=20.0,
         )
         response = client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=DEFAULT_CONSOLIDATION_MODEL,
             messages=[
                 {
                     "role": "system",
@@ -360,9 +406,8 @@ def _analyze_relationship_changes(
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=240,
-            extra_body=_deepseek_extra_body(),
-            reasoning_effort=_deepseek_reasoning_effort(),
+            max_tokens=700,
+            **_deepseek_request_options(),
         )
         raw_text = response.choices[0].message.content or ""
     except Exception:
@@ -396,6 +441,7 @@ def _apply_relationship_changes(
 ) -> list[dict[str, float | int]]:
     """Persist directed affinity deltas into the Relationship table."""
     applied: list[dict[str, float | int]] = []
+    timestamp = utc_now_seconds()
     for change in changes:
         target_agent_id = int(change["target_agent_id"])
         if target_agent_id == source_agent_id:
@@ -421,6 +467,19 @@ def _apply_relationship_changes(
         relationship.affinity_score = max(
             -100.0,
             min(100.0, float(relationship.affinity_score or 0.0) + affinity_change),
+        )
+        append_event(
+            db,
+            agent_id=source_agent_id,
+            event_type="RELATIONSHIP_CHANGED",
+            payload={
+                "target_agent_id": target_agent_id,
+                "affinity_change": affinity_change,
+                "affinity_score": relationship.affinity_score,
+                "source": "sleep_consolidation",
+            },
+            timestamp=timestamp,
+            commit=False,
         )
         applied.append(
             {
@@ -468,7 +527,7 @@ def _daily_event_summaries(
     if not records:
         return []
 
-    record_text = "\n".join(records[-120:])
+    record_text = "\n".join(_records_for_prompt(records))
     prompt = (
         "你是 Loop 的层级反思树构建器。"
         "请把今天的 Memory Stream 总结成 1 到 5 个具体 Daily Event。"
@@ -480,7 +539,7 @@ def _daily_event_summaries(
     raw_text = _call_deepseek_json(
         "你只输出 JSON 数组。",
         prompt,
-        max_tokens=700,
+        max_tokens=1000,
     )
     events = [
         str(item).strip()
@@ -533,7 +592,7 @@ def _deep_reflect_on_events(
     raw_text = _call_deepseek_json(
         "你只输出反思文本。",
         prompt,
-        max_tokens=420,
+        max_tokens=900,
     )
     return raw_text.strip()[:2000]
 
@@ -587,6 +646,7 @@ def _maybe_create_high_level_insight(
 def _clear_graph_working_memory(
     agent_id: int,
     user_id: int,
+    branch_id: str = "main",
 ) -> bool:
     """Clear short-term LangGraph topic messages while preserving summaries."""
     try:
@@ -595,9 +655,13 @@ def _clear_graph_working_memory(
 
         from app.services.agent_graph import agent_graph
 
+        normalized_branch_id = (branch_id or "main").strip() or "main"
+        thread_id = f"agent:{agent_id}"
+        if normalized_branch_id != "main":
+            thread_id = f"{thread_id}:branch:{normalized_branch_id}"
         config = {
             "configurable": {
-                "thread_id": f"agent:{agent_id}",
+                "thread_id": thread_id,
                 "user_id": user_id,
             },
         }
@@ -625,16 +689,24 @@ def _clear_graph_working_memory(
         return False
 
 
-def inspect_graph_working_memory(agent_id: int, user_id: int) -> dict[str, Any]:
+def inspect_graph_working_memory(
+    agent_id: int,
+    user_id: int,
+    branch_id: str = "main",
+) -> dict[str, Any]:
     """Return short-term LangGraph state for research instrumentation."""
+    normalized_branch_id = (branch_id or "main").strip() or "main"
     try:
         from langchain_core.messages import BaseMessage, RemoveMessage, SystemMessage
 
         from app.services.agent_graph import agent_graph
 
+        thread_id = f"agent:{agent_id}"
+        if normalized_branch_id != "main":
+            thread_id = f"{thread_id}:branch:{normalized_branch_id}"
         config = {
             "configurable": {
-                "thread_id": f"agent:{agent_id}",
+                "thread_id": thread_id,
                 "user_id": user_id,
             },
         }
@@ -663,6 +735,7 @@ def inspect_graph_working_memory(agent_id: int, user_id: int) -> dict[str, Any]:
         working_message_count = sum(topic_message_counts.values())
         return {
             "agent_id": agent_id,
+            "branch_id": normalized_branch_id,
             "graph_available": True,
             "message_count": working_message_count,
             "working_message_count": working_message_count,
@@ -681,6 +754,7 @@ def inspect_graph_working_memory(agent_id: int, user_id: int) -> dict[str, Any]:
     except Exception as exc:
         return {
             "agent_id": agent_id,
+            "branch_id": normalized_branch_id,
             "graph_available": False,
             "message_count": 0,
             "working_message_count": 0,
@@ -691,10 +765,22 @@ def inspect_graph_working_memory(agent_id: int, user_id: int) -> dict[str, Any]:
         }
 
 
-def clear_graph_working_memory(agent_id: int, user_id: int) -> dict[str, Any]:
+def clear_graph_working_memory(
+    agent_id: int,
+    user_id: int,
+    branch_id: str = "main",
+) -> dict[str, Any]:
     """Clear short-term LangGraph messages and return the updated state."""
-    _clear_graph_working_memory(agent_id=agent_id, user_id=user_id)
-    return inspect_graph_working_memory(agent_id=agent_id, user_id=user_id)
+    _clear_graph_working_memory(
+        agent_id=agent_id,
+        user_id=user_id,
+        branch_id=branch_id,
+    )
+    return inspect_graph_working_memory(
+        agent_id=agent_id,
+        user_id=user_id,
+        branch_id=branch_id,
+    )
 
 
 def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, Any]:
@@ -753,6 +839,13 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
         agent_id=source_agent.id,
         user_id=user_id,
     )
+    if graph_memory_cleared:
+        append_event(
+            db,
+            agent_id=source_agent.id,
+            event_type="WORKING_MEMORY_CLEARED",
+            payload={"source": "sleep_consolidation"},
+        )
 
     return {
         "message": "Agent sleep consolidation completed.",

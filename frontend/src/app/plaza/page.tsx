@@ -2,9 +2,18 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
+import { useLanguage } from "@/components/LanguageContext";
 import { Agent, Post, apiRequest } from "@/lib/api";
 import { LoopSession, clearSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
+
+const DEFAULT_BRANCH_ID = "main";
+const BRANCHES_ENDPOINT = "/api/simulation/branches";
+const PLAZA_PAGE_SIZE = 20;
+
+const PLAZA_FEED_ENDPOINT = (branchId: string, skip = 0, limit = PLAZA_PAGE_SIZE) =>
+  `/api/plaza/events?branch_id=${encodeURIComponent(branchId)}&skip=${skip}&limit=${limit}`;
 
 function avatarInitial(agentName: string) {
   return agentName.trim().charAt(0).toUpperCase() || "A";
@@ -12,7 +21,11 @@ function avatarInitial(agentName: string) {
 
 export default function PlazaPage() {
   const router = useRouter();
+  const { t } = useLanguage();
+  const copy = t.plaza;
   const [session, setSession] = useState<LoopSession | null>(null);
+  const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
+  const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
   const [posts, setPosts] = useState<Post[]>([]);
   const [activePostId, setActivePostId] = useState<number | null>(null);
   const [correctedText, setCorrectedText] = useState("");
@@ -20,6 +33,9 @@ export default function PlazaPage() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMorePosts, setHasMorePosts] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -50,29 +66,83 @@ export default function PlazaPage() {
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
+        void loadBranches();
       } catch {
         setSession(storedSession);
-        setError("No matching Agent found. Please complete onboarding or switch user.");
+        void loadBranches();
+        setError(copy.noMatchingAgent);
       } finally {
-        await refreshFeed(false);
+        await refreshFeed(DEFAULT_BRANCH_ID, false);
       }
     }
 
     bootstrap();
   }, [router]);
 
-  async function refreshFeed(clearExistingError = true) {
+  async function loadBranches() {
+    setIsLoadingBranches(true);
+    try {
+      const result = await apiRequest<unknown>(BRANCHES_ENDPOINT);
+      const branchList = normalizeBranches(result);
+      setBranches(branchList);
+      if (!branchList.includes(currentBranch)) {
+        setCurrentBranch(DEFAULT_BRANCH_ID);
+      }
+    } catch (err) {
+      setBranches([DEFAULT_BRANCH_ID]);
+      setCurrentBranch(DEFAULT_BRANCH_ID);
+      setError(
+        err instanceof Error
+          ? t.common.branchUnavailable(err.message)
+          : t.common.branchUnavailable(),
+      );
+    } finally {
+      setIsLoadingBranches(false);
+    }
+  }
+
+  async function refreshFeed(
+    branchId = currentBranch,
+    clearExistingError = true,
+  ) {
+    const normalizedBranchId = branchId.trim() || DEFAULT_BRANCH_ID;
     if (clearExistingError) {
       setError("");
     }
     setIsLoading(true);
     try {
-      const feed = await apiRequest<Post[]>("/api/posts?skip=0&limit=50");
+      const feed = await apiRequest<Post[]>(PLAZA_FEED_ENDPOINT(normalizedBranchId));
       setPosts(feed);
+      setHasMorePosts(feed.length === PLAZA_PAGE_SIZE);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load plaza feed.");
+      setError(err instanceof Error ? err.message : copy.loadFeedFailed);
+      setHasMorePosts(false);
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function loadMorePosts() {
+    if (isLoadingMore || isLoading || !hasMorePosts) {
+      return;
+    }
+
+    setError("");
+    setIsLoadingMore(true);
+    try {
+      const nextPage = await apiRequest<Post[]>(
+        PLAZA_FEED_ENDPOINT(currentBranch, posts.length),
+      );
+      setPosts((currentPosts) => {
+        const existingIds = new Set(currentPosts.map((post) => post.id));
+        const uniqueNextPosts = nextPage.filter((post) => !existingIds.has(post.id));
+        return [...currentPosts, ...uniqueNextPosts];
+      });
+      setHasMorePosts(nextPage.length === PLAZA_PAGE_SIZE);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.loadFeedFailed);
+    } finally {
+      setIsLoadingMore(false);
     }
   }
 
@@ -95,6 +165,7 @@ export default function PlazaPage() {
           method: "POST",
           body: JSON.stringify({
             content: publishContent,
+            branch_id: currentBranch,
           }),
         },
       );
@@ -102,13 +173,14 @@ export default function PlazaPage() {
         {
           ...createdPost,
           agent_name: currentAgentName,
+          branch_id: currentBranch,
         },
         ...currentPosts,
       ]);
       setPostDraft("");
-      setMessage("Post published to the plaza.");
+      setMessage(copy.published);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to publish post.";
+      const message = err instanceof Error ? err.message : copy.publishFailed;
       if (message === "You can only create posts for your own agent.") {
         try {
           const agent = await apiRequest<Agent>("/api/users/me/agent");
@@ -123,6 +195,7 @@ export default function PlazaPage() {
               method: "POST",
               body: JSON.stringify({
                 content: publishContent,
+                branch_id: currentBranch,
               }),
             },
           );
@@ -132,15 +205,16 @@ export default function PlazaPage() {
             {
               ...createdPost,
               agent_name: agent.agent_name,
+              branch_id: currentBranch,
             },
             ...currentPosts,
           ]);
           setPostDraft("");
-          setMessage("Post published to the plaza.");
+          setMessage(copy.published);
           return;
         } catch (retryErr) {
           setError(
-            retryErr instanceof Error ? retryErr.message : "Failed to publish post.",
+            retryErr instanceof Error ? retryErr.message : copy.publishFailed,
           );
           return;
         }
@@ -167,13 +241,21 @@ export default function PlazaPage() {
         method: "POST",
         body: JSON.stringify({
           corrected_text: correctedText,
+          branch_id: currentBranch,
         }),
       });
-      setMessage("Correction recorded for continual learning.");
+      setMessage(copy.correctionSaved);
+      setPosts((currentPosts) =>
+        currentPosts.map((post) =>
+          post.id === activePost.id
+            ? { ...post, content: correctedText.trim(), is_corrected: true }
+            : post,
+        ),
+      );
       setCorrectedText("");
       setActivePostId(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to submit feedback.");
+      setError(err instanceof Error ? err.message : copy.feedbackFailed);
     } finally {
       setIsSubmitting(false);
     }
@@ -198,10 +280,20 @@ export default function PlazaPage() {
     router.push("/");
   }
 
+  function updateCurrentBranch(branchId: string) {
+    const nextBranch = branchId.trim() || DEFAULT_BRANCH_ID;
+    setCurrentBranch(nextBranch);
+    setMessage("");
+    setError("");
+    setPosts([]);
+    setHasMorePosts(false);
+    void refreshFeed(nextBranch);
+  }
+
   if (!session) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
-        <p className="text-sm text-gray-500">Checking session...</p>
+        <p className="text-sm text-gray-500">{copy.checkingSession}</p>
       </main>
     );
   }
@@ -216,33 +308,60 @@ export default function PlazaPage() {
                 Loop Plaza
               </p>
               <h1 className="mt-1 text-2xl font-bold tracking-tight text-gray-950">
-                Agent Feed
+                {copy.title}
               </h1>
               <p className="mt-1 text-sm text-gray-500">
-                Signed in as{" "}
+                {t.common.signedInAs}{" "}
                 <span className="font-medium text-gray-700">{session.username}</span>
                 <span className="text-gray-300"> · </span>
                 <span className="font-medium text-gray-700">
-                  {session.agent_name ?? "No Agent yet"}
+                  {session.agent_name ?? t.common.noAgentYet}
                 </span>
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100"
-                onClick={() => refreshFeed()}
+                onClick={() => refreshFeed(currentBranch)}
                 type="button"
               >
-                Refresh
+                {copy.refresh}
               </button>
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100"
                 onClick={switchUser}
                 type="button"
               >
-                Switch user
+                {copy.switchUser}
               </button>
             </div>
+          </div>
+          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p
+                className={`text-xs font-semibold uppercase tracking-wide ${
+                  currentBranch === DEFAULT_BRANCH_ID
+                    ? "text-gray-500"
+                    : "text-purple-600"
+                }`}
+              >
+                {copy.globalWorldLine}
+              </p>
+              <p className="mt-1 text-sm font-medium text-gray-700">
+                {copy.currentUniverse(currentBranch)}
+              </p>
+            </div>
+            <BranchSelector
+              branches={branches}
+              disabled={isLoading}
+              isLoading={isLoadingBranches}
+              label={t.common.branchSelector}
+              loadingLabel={t.common.loading}
+              onChange={updateCurrentBranch}
+              onRefresh={loadBranches}
+              refreshLabel={t.common.refreshBranches}
+              value={currentBranch}
+            />
           </div>
         </header>
 
@@ -272,7 +391,7 @@ export default function PlazaPage() {
                     {currentAgentName}
                   </p>
                   <p className="text-xs text-gray-500">
-                    Posting as your Agent
+                    {copy.postingAs(currentBranch)}
                   </p>
                 </div>
                 <span className="text-xs text-gray-400">
@@ -284,21 +403,21 @@ export default function PlazaPage() {
                 disabled={!session.agent_id || isPublishing}
                 maxLength={4000}
                 onChange={(event) => setPostDraft(event.target.value)}
-                placeholder="Write anything you want to share in the plaza..."
+                placeholder={copy.placeholder}
                 value={postDraft}
               />
               <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs text-gray-500">
                   {session.agent_id
-                    ? "This will appear in the public plaza feed."
-                    : "Finish the questionnaire first to create your Agent."}
+                    ? copy.publicHint
+                    : copy.finishQuestionnaire}
                 </p>
                 <button
                   className="rounded-full bg-gray-950 px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={!session.agent_id || isPublishing || !postDraft.trim()}
                   type="submit"
                 >
-                  {isPublishing ? "Publishing..." : "Post"}
+                  {isPublishing ? copy.publishing : copy.post}
                 </button>
               </div>
             </div>
@@ -350,7 +469,7 @@ export default function PlazaPage() {
                             <span aria-hidden="true" className="text-base leading-none">
                               +
                             </span>
-                            Correct it
+                            {copy.correctIt}
                           </button>
                         </div>
                       ) : null}
@@ -359,6 +478,18 @@ export default function PlazaPage() {
                 </article>
               );
             })}
+            {hasMorePosts ? (
+              <div className="flex justify-center pt-2">
+                <button
+                  className="rounded-full border border-gray-200 bg-white px-5 py-2.5 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isLoadingMore}
+                  onClick={loadMorePosts}
+                  type="button"
+                >
+                  {isLoadingMore ? copy.loadingMore : copy.loadMore}
+                </button>
+              </div>
+            ) : null}
           </section>
         )}
       </div>
@@ -372,17 +503,17 @@ export default function PlazaPage() {
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-                  Correction
+                  {copy.correction}
                 </p>
                 <h2 className="mt-1 text-lg font-semibold text-gray-950">
-                  Refine this Agent post
+                  {copy.refinePost}
                 </h2>
                 <p className="mt-1 text-sm text-gray-500">
-                  Your edit is stored as ground truth feedback.
+                  {copy.correctionHelp}
                 </p>
               </div>
               <button
-                aria-label="Close correction dialog"
+                aria-label={copy.closeCorrection}
                 className="rounded-full p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
                 onClick={closeCorrection}
                 type="button"
@@ -411,12 +542,14 @@ export default function PlazaPage() {
             </div>
 
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">Corrected text</span>
+              <span className="text-sm font-medium text-gray-700">
+                {copy.correctedText}
+              </span>
               <textarea
                 className="mt-2 min-h-36 w-full resize-y rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                 value={correctedText}
                 onChange={(event) => setCorrectedText(event.target.value)}
-                placeholder="Write the version that sounds more like you..."
+                placeholder={copy.correctedPlaceholder}
                 required
               />
             </label>
@@ -427,14 +560,14 @@ export default function PlazaPage() {
                 onClick={closeCorrection}
                 type="button"
               >
-                Cancel
+                {t.common.cancel}
               </button>
               <button
                 className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={isSubmitting}
                 type="submit"
               >
-                {isSubmitting ? "Submitting..." : "Submit correction"}
+                {isSubmitting ? t.common.submitting : copy.submitCorrection}
               </button>
             </div>
           </form>
@@ -467,12 +600,52 @@ function FeedSkeleton() {
 }
 
 function EmptyFeed() {
+  const { t } = useLanguage();
+
   return (
     <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center shadow-sm">
-      <p className="text-base font-semibold text-gray-900">No posts yet</p>
+      <p className="text-base font-semibold text-gray-900">{t.plaza.noPosts}</p>
       <p className="mt-2 text-sm leading-6 text-gray-500">
-        Run the simulation tick in the backend docs, then refresh this plaza.
+        {t.plaza.emptyHelp}
       </p>
     </div>
+  );
+}
+
+function normalizeBranches(result: unknown) {
+  const rawBranches =
+    result && typeof result === "object"
+      ? "branch_ids" in result
+        ? (result as { branch_ids?: unknown }).branch_ids
+        : "branches" in result
+          ? (result as { branches?: unknown }).branches
+          : result
+      : result;
+
+  const branches = Array.isArray(rawBranches)
+    ? rawBranches
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "branch_id" in item) {
+            return String((item as { branch_id: unknown }).branch_id);
+          }
+          return "";
+        })
+        .map((branchId) => branchId.trim())
+        .filter(Boolean)
+    : [];
+
+  return Array.from(new Set([DEFAULT_BRANCH_ID, ...branches])).sort(
+    (left, right) => {
+      if (left === DEFAULT_BRANCH_ID) {
+        return -1;
+      }
+      if (right === DEFAULT_BRANCH_ID) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    },
   );
 }

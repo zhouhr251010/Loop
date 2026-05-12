@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
+import { useLanguage } from "@/components/LanguageContext";
 import {
   Agent,
   AgentWorkingMemoryState,
@@ -15,9 +17,33 @@ import {
 import { LoopSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
 
+const DEFAULT_BRANCH_ID = "main";
+const RELATIONSHIP_PREVIEW_LIMIT = 10;
+const FEED_PREVIEW_LIMIT = 5;
+
+const BRANCHES_ENDPOINT = (agentId: number) =>
+  `/api/simulation/agents/${agentId}/branches`;
+
+const MEMORY_STATE_ENDPOINT = (branchId: string) =>
+  `/api/agents/me/memory/state?branch_id=${encodeURIComponent(branchId)}`;
+
+const CLEAR_MEMORY_ENDPOINT = (branchId: string) =>
+  `/api/agents/me/memory/clear?branch_id=${encodeURIComponent(branchId)}`;
+
+const RELATIONSHIPS_PREVIEW_ENDPOINT =
+  `/api/agents/me/relationships?limit=${RELATIONSHIP_PREVIEW_LIMIT}`;
+
+const FEED_PREVIEW_ENDPOINT =
+  `/api/agents/me/feed-preview?limit=${FEED_PREVIEW_LIMIT}`;
+
 export default function MemoryPage() {
   const router = useRouter();
+  const { t } = useLanguage();
+  const copy = t.memory;
+  const diagnosticsRequestIdRef = useRef(0);
   const [session, setSession] = useState<LoopSession | null>(null);
+  const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
+  const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
   const [content, setContent] = useState("");
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(3);
@@ -35,6 +61,7 @@ export default function MemoryPage() {
   const [isSleeping, setIsSleeping] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
 
   useEffect(() => {
     async function bootstrap() {
@@ -53,10 +80,11 @@ export default function MemoryPage() {
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
-        await refreshDiagnostics(hydratedSession);
+        void loadBranches(hydratedSession.agent_id);
+        await refreshDiagnostics(hydratedSession, DEFAULT_BRANCH_ID);
       } catch {
         setSession(storedSession);
-        setError("No Agent found. Please complete onboarding before testing memory.");
+        setError(copy.noAgent);
       }
     }
 
@@ -72,32 +100,68 @@ export default function MemoryPage() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  async function refreshDiagnostics(targetSession = session) {
+  async function loadBranches(agentId: number) {
+    setIsLoadingBranches(true);
+    try {
+      const result = await apiRequest<unknown>(BRANCHES_ENDPOINT(agentId));
+      const branchList = normalizeBranches(result);
+      setBranches(branchList);
+      if (!branchList.includes(currentBranch)) {
+        setCurrentBranch(DEFAULT_BRANCH_ID);
+      }
+    } catch (err) {
+      setBranches([DEFAULT_BRANCH_ID]);
+      setCurrentBranch(DEFAULT_BRANCH_ID);
+      setToast(
+        err instanceof Error
+          ? t.common.branchUnavailable(err.message)
+          : t.common.branchUnavailable(),
+      );
+    } finally {
+      setIsLoadingBranches(false);
+    }
+  }
+
+  async function refreshDiagnostics(
+    targetSession = session,
+    branchId = currentBranch,
+  ) {
     if (!targetSession?.agent_id) {
       return;
     }
 
+    const normalizedBranchId = branchId.trim() || DEFAULT_BRANCH_ID;
+    const requestId = diagnosticsRequestIdRef.current + 1;
+    diagnosticsRequestIdRef.current = requestId;
     setIsRefreshing(true);
     setError("");
     try {
       const [state, graph, preview] = await Promise.all([
         apiRequest<AgentWorkingMemoryState>(
-          "/api/agents/me/memory/state",
+          MEMORY_STATE_ENDPOINT(normalizedBranchId),
         ),
         apiRequest<Relationship[]>(
-          "/api/agents/me/relationships",
+          RELATIONSHIPS_PREVIEW_ENDPOINT,
         ),
         apiRequest<PersonalizedPostPreview[]>(
-          "/api/agents/me/feed-preview?limit=12",
+          FEED_PREVIEW_ENDPOINT,
         ),
       ]);
+      if (diagnosticsRequestIdRef.current !== requestId) {
+        return;
+      }
       setWorkingState(state);
       setRelationships(graph);
       setFeedPreview(preview);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to refresh diagnostics.");
+      if (diagnosticsRequestIdRef.current !== requestId) {
+        return;
+      }
+      setError(err instanceof Error ? err.message : copy.refreshFailed);
     } finally {
-      setIsRefreshing(false);
+      if (diagnosticsRequestIdRef.current === requestId) {
+        setIsRefreshing(false);
+      }
     }
   }
 
@@ -120,9 +184,9 @@ export default function MemoryPage() {
         },
       );
       setContent("");
-      setToast(`记忆上传成功，写入 ${result.chunks_added} 个片段。`);
+      setToast(copy.uploadSuccess(result.chunks_added));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to upload memory.");
+      setError(err instanceof Error ? err.message : copy.uploadFailed);
     } finally {
       setIsUploading(false);
     }
@@ -149,7 +213,7 @@ export default function MemoryPage() {
       );
       setSearchResult(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to search memory.");
+      setError(err instanceof Error ? err.message : copy.searchFailed);
     } finally {
       setIsSearching(false);
     }
@@ -169,10 +233,10 @@ export default function MemoryPage() {
         { method: "POST" },
       );
       setSleepResult(result);
-      setToast("睡眠巩固完成。");
-      await refreshDiagnostics();
+      setToast(copy.sleepDone);
+      await refreshDiagnostics(session, currentBranch);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to trigger sleep.");
+      setError(err instanceof Error ? err.message : copy.sleepFailed);
     } finally {
       setIsSleeping(false);
     }
@@ -187,22 +251,32 @@ export default function MemoryPage() {
     setIsClearing(true);
     try {
       const state = await apiRequest<AgentWorkingMemoryState>(
-        "/api/agents/me/memory/clear",
+        CLEAR_MEMORY_ENDPOINT(currentBranch),
         { method: "POST" },
       );
       setWorkingState(state);
-      setToast("短期工作记忆已清空。");
+      setToast(copy.stmCleared);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear memory.");
+      setError(err instanceof Error ? err.message : copy.clearFailed);
     } finally {
       setIsClearing(false);
     }
   }
 
+  function updateCurrentBranch(branchId: string) {
+    const nextBranch = branchId.trim() || DEFAULT_BRANCH_ID;
+    setCurrentBranch(nextBranch);
+    setWorkingState(null);
+    setSearchResult(null);
+    setError("");
+    setToast("");
+    void refreshDiagnostics(session, nextBranch);
+  }
+
   if (!session) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
-        <p className="text-sm text-gray-500">Loading memory lab...</p>
+        <p className="text-sm text-gray-500">{copy.loading}</p>
       </main>
     );
   }
@@ -217,28 +291,55 @@ export default function MemoryPage() {
           <div className="mt-2 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h1 className="text-3xl font-bold tracking-tight text-gray-950">
-                记忆与社会图谱测试台
+                {copy.title}
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-500">
-                用于手动测试 RAG 情景记忆、睡眠巩固、短期工作记忆清空，以及熟人社会图谱对信息茧房排序的影响。
+                {copy.subtitle}
               </p>
               <p className="mt-2 text-sm text-gray-400">
-                Testing as{" "}
+                {t.common.testingAs}{" "}
                 <span className="font-medium text-gray-600">@{session.username}</span>
                 {" · "}
                 <span className="font-medium text-gray-600">
-                  {session.agent_name ?? "No Agent yet"}
+                  {session.agent_name ?? t.common.noAgentYet}
                 </span>
               </p>
             </div>
             <button
               className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={isRefreshing || !session.agent_id}
-              onClick={() => refreshDiagnostics()}
+              disabled={isRefreshing || isLoadingBranches || !session.agent_id}
+              onClick={() => refreshDiagnostics(session, currentBranch)}
               type="button"
             >
-              {isRefreshing ? "Refreshing..." : "Refresh diagnostics"}
+              {isRefreshing ? t.common.refreshing : copy.refreshDiagnostics}
             </button>
+          </div>
+          <div className="mt-5 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p
+                className={`text-xs font-semibold uppercase tracking-wide ${
+                  currentBranch === DEFAULT_BRANCH_ID
+                    ? "text-gray-500"
+                    : "text-purple-600"
+                }`}
+              >
+                {copy.currentTimeline}
+              </p>
+              <p className="mt-1 text-sm font-medium text-gray-700">
+                {copy.currentView(currentBranch)}
+              </p>
+            </div>
+            <BranchSelector
+              branches={branches}
+              disabled={!session.agent_id || isRefreshing}
+              isLoading={isLoadingBranches}
+              label={t.common.branchSelector}
+              loadingLabel={t.common.loading}
+              onChange={updateCurrentBranch}
+              onRefresh={() => session.agent_id && loadBranches(session.agent_id)}
+              refreshLabel={t.common.refreshBranches}
+              value={currentBranch}
+            />
           </div>
         </header>
 
@@ -256,21 +357,21 @@ export default function MemoryPage() {
             >
               <div className="mb-4">
                 <h2 className="text-lg font-semibold text-gray-950">
-                  RAG 记忆上传
+                  {copy.uploadTitle}
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-500">
-                  粘贴日记、聊天记录、设定或测试片段，写入用户作用域的 Chroma 记忆库。
+                  {copy.uploadHelp}
                 </p>
               </div>
               <label className="block">
                 <span className="text-sm font-medium text-gray-700">
-                  Memory content
+                  {copy.memoryContent}
                 </span>
                 <textarea
                   className="mt-3 min-h-64 w-full resize-y rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
                   disabled={isUploading}
                   onChange={(event) => setContent(event.target.value)}
-                  placeholder="例如：今天我在广场看到某个 Agent 反复讨论风险，我感到他和我的价值观更接近..."
+                  placeholder={copy.uploadPlaceholder}
                   required
                   value={content}
                 />
@@ -278,14 +379,14 @@ export default function MemoryPage() {
 
               <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs text-gray-400">
-                  {content.trim().length.toLocaleString()} characters ready
+                  {copy.readyChars(content.trim().length.toLocaleString())}
                 </p>
                 <button
                   className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={isUploading || !content.trim()}
                   type="submit"
                 >
-                  {isUploading ? "Uploading..." : "上传记忆"}
+                  {isUploading ? copy.uploading : copy.uploadMemory}
                 </button>
               </div>
             </form>
@@ -296,19 +397,21 @@ export default function MemoryPage() {
             >
               <div className="mb-4">
                 <h2 className="text-lg font-semibold text-gray-950">
-                  RAG 检索测试
+                  {copy.searchTitle}
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-500">
-                  输入查询词，直接查看会被 Agent 私聊调用的相关记忆片段。
+                  {copy.searchHelp}
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
                 <label className="block">
-                  <span className="text-sm font-medium text-gray-700">Query</span>
+                  <span className="text-sm font-medium text-gray-700">
+                    {copy.query}
+                  </span>
                   <input
                     className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="检索关键词或一句测试问题..."
+                    placeholder={copy.queryPlaceholder}
                     value={query}
                   />
                 </label>
@@ -330,14 +433,14 @@ export default function MemoryPage() {
                   disabled={isSearching || !query.trim()}
                   type="submit"
                 >
-                  {isSearching ? "Searching..." : "检索记忆"}
+                  {isSearching ? copy.searching : copy.searchMemory}
                 </button>
               </div>
             </form>
 
             <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <h2 className="text-lg font-semibold text-gray-950">
-                RAG 检索结果
+                {copy.resultsTitle}
               </h2>
               {searchResult ? (
                 <div className="mt-4 space-y-3">
@@ -361,13 +464,13 @@ export default function MemoryPage() {
                     ))
                   ) : (
                     <p className="mt-3 text-sm text-gray-500">
-                      没有检索到片段。可以先上传测试记忆。
+                      {copy.noChunks}
                     </p>
                   )}
                 </div>
               ) : (
                 <p className="mt-3 text-sm text-gray-500">
-                  检索后会在这里显示召回片段。
+                  {copy.resultsEmpty}
                 </p>
               )}
             </section>
@@ -378,10 +481,10 @@ export default function MemoryPage() {
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold text-gray-950">
-                    睡眠巩固
+                    {copy.sleepTitle}
                   </h2>
                   <p className="mt-1 text-sm leading-6 text-gray-500">
-                    汇总 24 小时私聊和广场记录，写入情景记忆，并推断关系变化。
+                    {copy.sleepHelp}
                   </p>
                 </div>
                 <button
@@ -390,25 +493,25 @@ export default function MemoryPage() {
                   onClick={sleepAgent}
                   type="button"
                 >
-                  {isSleeping ? "Sleeping..." : "Trigger sleep"}
+                  {isSleeping ? copy.sleeping : copy.triggerSleep}
                 </button>
               </div>
               {sleepResult ? (
                 <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                  <Metric label="records" value={sleepResult.records_consolidated} />
-                  <Metric label="chunks" value={sleepResult.chunks_added} />
+                  <Metric label={copy.metricRecords} value={sleepResult.records_consolidated} />
+                  <Metric label={copy.metricChunks} value={sleepResult.chunks_added} />
                   <Metric
-                    label="relations"
+                    label={copy.metricRelations}
                     value={sleepResult.relationship_updates.length}
                   />
                   <Metric
-                    label="stm cleared"
-                    value={sleepResult.graph_memory_cleared ? "yes" : "no"}
+                    label={copy.metricStmCleared}
+                    value={sleepResult.graph_memory_cleared ? copy.yes : copy.no}
                   />
                 </dl>
               ) : (
                 <p className="mt-4 text-sm text-gray-500">
-                  触发后会显示巩固记录数、写入片段数、关系更新数和短期记忆清空结果。
+                  {copy.sleepEmpty}
                 </p>
               )}
             </section>
@@ -417,10 +520,10 @@ export default function MemoryPage() {
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold text-gray-950">
-                    短期工作记忆
+                    {copy.stmTitle}
                   </h2>
                   <p className="mt-1 text-sm leading-6 text-gray-500">
-                    查看 LangGraph checkpoint 中的消息数量、摘要、情绪和精力。
+                    {copy.stmHelp}
                   </p>
                 </div>
                 <button
@@ -429,26 +532,34 @@ export default function MemoryPage() {
                   onClick={clearWorkingMemory}
                   type="button"
                 >
-                  {isClearing ? "Clearing..." : "Clear STM"}
+                  {isClearing ? copy.clearing : copy.clearStm}
                 </button>
               </div>
               {workingState ? (
                 <div className="mt-4 space-y-3">
                   <dl className="grid grid-cols-2 gap-3 text-sm">
                     <Metric
-                      label="available"
-                      value={workingState.graph_available ? "yes" : "no"}
+                      label={copy.metricAvailable}
+                      value={workingState.graph_available ? copy.yes : copy.no}
                     />
-                    <Metric label="messages" value={workingState.message_count} />
+                    <Metric label={copy.metricMessages} value={workingState.message_count} />
                     <Metric
-                      label="working"
+                      label={copy.metricWorking}
                       value={workingState.working_message_count}
                     />
-                    <Metric label="energy" value={workingState.energy} />
+                    <Metric label={copy.metricEnergy} value={workingState.energy} />
                   </dl>
                   <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                     <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Emotion
+                      {copy.coreMemory} · {workingState.branch_id}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-700">
+                      {workingState.current_core_memory || copy.noCoreMemory}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                      {copy.emotion}
                     </p>
                     <p className="mt-1 text-sm text-gray-700">
                       {workingState.emotion}
@@ -456,32 +567,43 @@ export default function MemoryPage() {
                   </div>
                   <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
                     <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Summary
+                      {copy.summary}
                     </p>
                     <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-700">
-                      {workingState.summary || "暂无压缩摘要。"}
+                      {workingState.summary || copy.noSummary}
                     </p>
                   </div>
                   {workingState.error ? (
                     <p className="text-xs leading-5 text-amber-600">
-                      Graph unavailable: {workingState.error}
+                      {copy.graphUnavailable}: {workingState.error}
                     </p>
                   ) : null}
                 </div>
               ) : (
                 <p className="mt-4 text-sm text-gray-500">
-                  刷新诊断后会显示当前短期记忆状态。
+                  {copy.stmEmpty}
                 </p>
               )}
             </section>
 
             <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-gray-950">
-                熟人社会图谱
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-gray-500">
-                睡眠巩固会更新从当前 Agent 指向其他 Agent 的 affinity_score。
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-950">
+                    {copy.socialGraph}
+                  </h2>
+                  <p className="mt-1 text-sm leading-6 text-gray-500">
+                    {copy.socialGraphHelp(RELATIONSHIP_PREVIEW_LIMIT)}
+                  </p>
+                </div>
+                <button
+                  className="shrink-0 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:bg-gray-100"
+                  onClick={() => setToast(copy.viewAllComingSoon)}
+                  type="button"
+                >
+                  {copy.viewAll}
+                </button>
+              </div>
               <div className="mt-4 space-y-2">
                 {relationships.length > 0 ? (
                   relationships.map((relationship) => (
@@ -502,19 +624,30 @@ export default function MemoryPage() {
                   ))
                 ) : (
                   <p className="text-sm text-gray-500">
-                    暂无其他 Agent 或关系数据。
+                    {copy.noRelationships}
                   </p>
                 )}
               </div>
             </section>
 
             <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-              <h2 className="text-lg font-semibold text-gray-950">
-                信息茧房 Feed 预览
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-gray-500">
-                按 affinity_score 优先排序的广场内容预览，分数越高越靠前。
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-950">
+                    {copy.feedPreview}
+                  </h2>
+                  <p className="mt-1 text-sm leading-6 text-gray-500">
+                    {copy.feedPreviewHelp(FEED_PREVIEW_LIMIT)}
+                  </p>
+                </div>
+                <button
+                  className="shrink-0 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:border-gray-300 hover:bg-gray-100"
+                  onClick={() => setToast(copy.viewAllComingSoon)}
+                  type="button"
+                >
+                  {copy.viewAll}
+                </button>
+              </div>
               <div className="mt-4 space-y-3">
                 {feedPreview.length > 0 ? (
                   feedPreview.map((post) => (
@@ -542,7 +675,7 @@ export default function MemoryPage() {
                   ))
                 ) : (
                   <p className="text-sm text-gray-500">
-                    暂无可预览帖子。先让其他 Agent 发帖或运行 simulation tick。
+                    {copy.noPreview}
                   </p>
                 )}
               </div>
@@ -568,5 +701,43 @@ function Metric({ label, value }: { label: string; value: number | string }) {
       </dt>
       <dd className="mt-1 text-lg font-semibold text-gray-950">{value}</dd>
     </div>
+  );
+}
+
+function normalizeBranches(result: unknown) {
+  const rawBranches =
+    result && typeof result === "object"
+      ? "branch_ids" in result
+        ? (result as { branch_ids?: unknown }).branch_ids
+        : "branches" in result
+          ? (result as { branches?: unknown }).branches
+          : result
+      : result;
+
+  const branches = Array.isArray(rawBranches)
+    ? rawBranches
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "branch_id" in item) {
+            return String((item as { branch_id: unknown }).branch_id);
+          }
+          return "";
+        })
+        .map((branchId) => branchId.trim())
+        .filter(Boolean)
+    : [];
+
+  return Array.from(new Set([DEFAULT_BRANCH_ID, ...branches])).sort(
+    (left, right) => {
+      if (left === DEFAULT_BRANCH_ID) {
+        return -1;
+      }
+      if (right === DEFAULT_BRANCH_ID) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    },
   );
 }

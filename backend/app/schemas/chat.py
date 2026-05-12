@@ -12,6 +12,7 @@ class ChatMessageCreate(BaseModel):
     """Incoming private chat message from the user."""
 
     message: str = Field(..., min_length=1, max_length=4000)
+    branch_id: str = Field(..., min_length=1, max_length=128)
     model: ChatModelChoice = "fast"
 
 
@@ -25,6 +26,7 @@ class ChatLogOut(BaseModel):
     user_message: str
     agent_reply: str
     timestamp: datetime
+    branch_id: str = "main"
 
 
 class ChatReplyOut(BaseModel):

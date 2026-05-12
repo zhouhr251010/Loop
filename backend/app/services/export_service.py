@@ -5,6 +5,7 @@ import json
 from sqlalchemy.orm import Session
 
 from app import models
+from app.services.branching import normalize_branch_id
 
 
 def _to_jsonl(rows: list[dict]) -> str:
@@ -23,12 +24,20 @@ def _system_prompt_for_agent(agent: models.Agent) -> str:
     )
 
 
-def export_chatlogs_to_jsonl(db: Session, user_id: int) -> str:
+def export_chatlogs_to_jsonl(
+    db: Session,
+    user_id: int,
+    branch_id: str = "main",
+) -> str:
     """Export one user's private chat turns in OpenAI/DeepSeek SFT JSONL format."""
+    normalized_branch_id = normalize_branch_id(branch_id)
     chat_logs = (
         db.query(models.ChatLog)
         .join(models.Agent)
-        .filter(models.Agent.user_id == user_id)
+        .filter(
+            models.Agent.user_id == user_id,
+            models.ChatLog.branch_id == normalized_branch_id,
+        )
         .order_by(models.ChatLog.timestamp.asc(), models.ChatLog.id.asc())
         .all()
     )
@@ -57,11 +66,36 @@ def export_chatlogs_to_jsonl(db: Session, user_id: int) -> str:
     return _to_jsonl(rows)
 
 
-def export_feedback_to_jsonl(db: Session, user_id: int) -> str:
+def export_feedback_to_jsonl(
+    db: Session,
+    user_id: int,
+    branch_id: str = "main",
+) -> str:
     """Export one user's plaza correction feedback in SFT JSONL format."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    post_id_rows = (
+        db.query(models.EventLog.payload)
+        .filter(
+            models.EventLog.branch_id == normalized_branch_id,
+            models.EventLog.event_type == "POST_CREATED",
+        )
+        .all()
+    )
+    post_ids = {
+        int(payload.get("post_id"))
+        for (payload,) in post_id_rows
+        if isinstance(payload, dict)
+        and str(payload.get("post_id") or "").strip().isdigit()
+    }
+    if not post_ids:
+        return _to_jsonl([])
+
     feedback_logs = (
         db.query(models.FeedbackLog)
-        .filter(models.FeedbackLog.user_id == user_id)
+        .filter(
+            models.FeedbackLog.user_id == user_id,
+            models.FeedbackLog.post_id.in_(post_ids),
+        )
         .order_by(models.FeedbackLog.timestamp.asc(), models.FeedbackLog.id.asc())
         .all()
     )

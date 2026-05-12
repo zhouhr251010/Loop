@@ -8,13 +8,22 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app import models
+from app.models import utc_now_seconds
+from app.services.event_store import append_event
 
 
-CORE_MEMORY_KEYS = ("persona_traits", "key_relationships", "current_goals")
+CORE_MEMORY_KEYS = (
+    "persona_traits",
+    "key_relationships",
+    "current_goals",
+    "communication_style",
+)
+PROMPT_CORE_MEMORY_FIELD_LIMIT = 1200
 DEFAULT_CORE_MEMORY: dict[str, str] = {
     "persona_traits": "",
     "key_relationships": "",
     "current_goals": "",
+    "communication_style": "",
 }
 
 
@@ -42,13 +51,26 @@ def normalize_core_memory(value: Any) -> dict[str, str]:
 def format_core_memory_for_prompt(value: Any) -> str:
     """Render core memory as the highest-priority prompt block."""
     core_memory = normalize_core_memory(value)
+    prompt_memory = {
+        key: _truncate_prompt_field(core_memory[key])
+        for key in CORE_MEMORY_KEYS
+    }
     return (
         "【最高优先级 Core Memory / 不可滑动核心记忆】\n"
-        f"persona_traits: {core_memory['persona_traits'] or '暂无'}\n"
-        f"key_relationships: {core_memory['key_relationships'] or '暂无'}\n"
-        f"current_goals: {core_memory['current_goals'] or '暂无'}\n"
+        f"persona_traits: {prompt_memory['persona_traits'] or '暂无'}\n"
+        f"key_relationships: {prompt_memory['key_relationships'] or '暂无'}\n"
+        f"current_goals: {prompt_memory['current_goals'] or '暂无'}\n"
+        f"communication_style: {prompt_memory['communication_style'] or '暂无'}\n"
         "这些内容是你的稳定自我认知，优先级高于 RAG 检索片段和短期上下文。"
     )
+
+
+def _truncate_prompt_field(value: str) -> str:
+    """Keep core memory prompt fields bounded even if persisted memory grows."""
+    clean_value = (value or "").strip()
+    if len(clean_value) <= PROMPT_CORE_MEMORY_FIELD_LIMIT:
+        return clean_value
+    return f"{clean_value[:PROMPT_CORE_MEMORY_FIELD_LIMIT]}...[truncated]"
 
 
 def edit_user_core_memory(
@@ -70,7 +92,22 @@ def edit_user_core_memory(
 
     core_memory = normalize_core_memory(user.core_memory)
     core_memory[normalized_key] = (new_value or "").strip()[:8000]
+    timestamp = utc_now_seconds()
     user.core_memory = core_memory
+    if user.agent is not None:
+        append_event(
+            db,
+            agent_id=user.agent.id,
+            event_type="CORE_MEMORY_UPDATED",
+            payload={
+                "key": normalized_key,
+                "new_value": core_memory[normalized_key],
+                "core_memory": core_memory,
+                "source": "edit_core_memory",
+            },
+            timestamp=timestamp,
+            commit=False,
+        )
     db.commit()
     db.refresh(user)
     return core_memory
@@ -97,7 +134,23 @@ def merge_core_memory_insight(
     else:
         core_memory["persona_traits"] = f"- {clean_insight}"[-8000:]
 
+    timestamp = utc_now_seconds()
     user.core_memory = core_memory
+    if user.agent is not None:
+        append_event(
+            db,
+            agent_id=user.agent.id,
+            event_type="CORE_MEMORY_UPDATED",
+            payload={
+                "key": "persona_traits",
+                "new_value": core_memory["persona_traits"],
+                "insight": clean_insight,
+                "core_memory": core_memory,
+                "source": "sleep_consolidation",
+            },
+            timestamp=timestamp,
+            commit=False,
+        )
     db.commit()
     db.refresh(user)
     return core_memory

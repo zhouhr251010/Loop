@@ -1,5 +1,7 @@
 """Pydantic schemas for digital memory uploads."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -58,9 +60,12 @@ class AgentWorkingMemoryOut(BaseModel):
     """Inspectable short-term LangGraph memory state for one Agent."""
 
     agent_id: int
+    branch_id: str = "main"
     graph_available: bool
     message_count: int = 0
     working_message_count: int = 0
+    core_memory: dict[str, Any] = Field(default_factory=dict)
+    current_core_memory: str = ""
     summary: str = ""
     active_topic: str = ""
     topic_count: int = 0

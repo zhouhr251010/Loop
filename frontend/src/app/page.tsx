@@ -9,23 +9,33 @@ import {
   User,
   apiRequest,
 } from "@/lib/api";
+import { useLanguage } from "@/components/LanguageContext";
+import type { Dictionary } from "@/locales/dictionary";
 import { LoopSession, clearSession, loadSession, saveSession } from "@/lib/session";
 
 const bigFiveFields = [
-  ["openness", "Openness"],
-  ["conscientiousness", "Conscientiousness"],
-  ["extraversion", "Extraversion"],
-  ["agreeableness", "Agreeableness"],
-  ["neuroticism", "Neuroticism"],
+  "openness",
+  "conscientiousness",
+  "extraversion",
+  "agreeableness",
+  "neuroticism",
 ] as const;
 
 const schwartzFields = [
-  ["self_direction", "Self Direction"],
-  ["universalism", "Universalism"],
-  ["security", "Security"],
+  "self_direction",
+  "universalism",
+  "security",
 ] as const;
 
-type ScoreField = readonly [key: string, label: string];
+type ScoreField = (typeof bigFiveFields | typeof schwartzFields)[number];
+
+type AgentChoiceStatus =
+  | { type: "instructions" }
+  | { type: "loading" }
+  | { type: "loaded"; count: number }
+  | { type: "empty" }
+  | { type: "apiUnreachable" }
+  | { type: "requestFailed" };
 
 type QuestionnaireResponse = {
   user: User;
@@ -33,14 +43,27 @@ type QuestionnaireResponse = {
 };
 
 function initialScores(fields: readonly ScoreField[]) {
-  return Object.fromEntries(fields.map(([key]) => [key, 50])) as Record<
+  return Object.fromEntries(fields.map((key) => [key, 50])) as Record<
     string,
     number
   >;
 }
 
+function formatAgentChoiceStatus(
+  status: AgentChoiceStatus,
+  copy: Dictionary["auth"],
+) {
+  if (status.type === "loaded") {
+    return copy.agentChoiceStatus.loaded(status.count);
+  }
+
+  return copy.agentChoiceStatus[status.type];
+}
+
 export default function OnboardingPage() {
   const router = useRouter();
+  const { t } = useLanguage();
+  const copy = t.auth;
   const [authMode, setAuthMode] = useState<"register" | "login">("register");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -58,9 +81,9 @@ export default function OnboardingPage() {
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [enteringAgentId, setEnteringAgentId] = useState<number | null>(null);
-  const [agentChoiceStatus, setAgentChoiceStatus] = useState(
-    "Enter the admin key, then load the existing Agent list.",
-  );
+  const [agentChoiceStatus, setAgentChoiceStatus] = useState<AgentChoiceStatus>({
+    type: "instructions",
+  });
 
   useEffect(() => {
     const session = loadSession();
@@ -138,7 +161,7 @@ export default function OnboardingPage() {
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Authentication failed.");
+      setError(err instanceof Error ? err.message : copy.authFailed);
     } finally {
       setIsSubmitting(false);
     }
@@ -177,7 +200,7 @@ export default function OnboardingPage() {
       });
       router.push("/plaza");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Questionnaire submission failed.");
+      setError(err instanceof Error ? err.message : copy.questionnaireFailed);
     } finally {
       setIsSubmitting(false);
     }
@@ -186,12 +209,12 @@ export default function OnboardingPage() {
   async function loadAgentChoices() {
     const trimmedAdminKey = adminKey.trim();
     if (!trimmedAdminKey) {
-      setError("Admin key is required.");
+      setError(copy.adminKeyRequired);
       return;
     }
 
     setError("");
-    setAgentChoiceStatus("Loading existing Agents...");
+    setAgentChoiceStatus({ type: "loading" });
     setIsLoadingAgents(true);
     try {
       const choices = await apiRequest<AgentSessionChoice[]>(
@@ -204,17 +227,15 @@ export default function OnboardingPage() {
       );
       setAgentChoices(choices);
       setAgentChoiceStatus(
-        choices.length > 0
-          ? `Loaded ${choices.length} Agent${choices.length === 1 ? "" : "s"}.`
-          : "No existing Agents were found in the database.",
+        choices.length > 0 ? { type: "loaded", count: choices.length } : { type: "empty" },
       );
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to load agents.";
+      const message = err instanceof Error ? err.message : copy.failedToLoadAgents;
       setError(message);
       setAgentChoiceStatus(
         message.includes("Failed to fetch")
-          ? "Could not reach the API. Restart FastAPI and Next.js, then try again."
-          : "Agent list request failed. Check the admin key and backend logs.",
+          ? { type: "apiUnreachable" }
+          : { type: "requestFailed" },
       );
     } finally {
       setIsLoadingAgents(false);
@@ -224,7 +245,7 @@ export default function OnboardingPage() {
   async function enterAgentChoice(choice: AgentSessionChoice) {
     const trimmedAdminKey = adminKey.trim();
     if (!trimmedAdminKey) {
-      setError("Admin key is required.");
+      setError(copy.adminKeyRequired);
       return;
     }
 
@@ -243,7 +264,7 @@ export default function OnboardingPage() {
       persistAuthSession(authSession, choice.agent);
       router.push("/plaza");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to enter agent.");
+      setError(err instanceof Error ? err.message : copy.failedToEnterAgent);
     } finally {
       setEnteringAgentId(null);
     }
@@ -254,17 +275,17 @@ export default function OnboardingPage() {
       <div className="mx-auto w-full max-w-3xl">
         <div className="mb-8">
           <p className="text-sm font-medium uppercase tracking-wide text-gray-500">
-            {user ? "Step 2 of 2" : "Step 1 of 2"} · Loop Research Platform
+            {copy.step(user ? 2 : 1)}
           </p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight text-gray-950">
-            {user ? "Personality profile" : "Participant registration"}
+            {user ? copy.profileTitle : copy.registrationTitle}
           </h1>
           <p className="mt-2 text-sm leading-6 text-gray-600">
             {user
-              ? `Registered as ${user.username}. Complete the personality questionnaire to generate your digital Agent.`
+              ? copy.profileSubtitle(user.username)
               : authMode === "register"
-                ? "Register first, then describe your identity core and generate your digital Agent."
-                : "Sign in to continue your Loop research session."}
+                ? copy.registerSubtitle
+                : copy.loginSubtitle}
           </p>
         </div>
 
@@ -276,7 +297,7 @@ export default function OnboardingPage() {
 
         {user ? (
           <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-            Session secured. Continue with the personality profile below.
+            {copy.sessionSecured}
           </div>
         ) : null}
 
@@ -285,13 +306,13 @@ export default function OnboardingPage() {
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm font-medium text-amber-900">
-                  Previous local session found
+                  {copy.previousSessionTitle}
                 </p>
                 <p className="mt-1 text-sm text-amber-800">
-                  Signed in as {existingSession.username}
+                  {copy.signedInAs(existingSession.username)}
                   {existingSession.agent_name
                     ? ` · ${existingSession.agent_name}`
-                    : " · profile not completed"}
+                    : ` · ${copy.profileIncomplete}`}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -300,14 +321,14 @@ export default function OnboardingPage() {
                   onClick={continueExistingSession}
                   type="button"
                 >
-                  Continue
+                  {copy.continue}
                 </button>
                 <button
                   className="rounded-full border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:border-amber-500"
                   onClick={resetLocalSessionForNewUser}
                   type="button"
                 >
-                  Register new user
+                  {copy.registerNewUser}
                 </button>
               </div>
             </div>
@@ -321,7 +342,9 @@ export default function OnboardingPage() {
               className="space-y-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
             >
               <label className="block">
-                <span className="text-sm font-medium text-gray-700">Username</span>
+                <span className="text-sm font-medium text-gray-700">
+                  {t.common.username}
+                </span>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                   minLength={3}
@@ -331,7 +354,9 @@ export default function OnboardingPage() {
                 />
               </label>
               <label className="block">
-                <span className="text-sm font-medium text-gray-700">Password</span>
+                <span className="text-sm font-medium text-gray-700">
+                  {t.common.password}
+                </span>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                   minLength={8}
@@ -347,10 +372,10 @@ export default function OnboardingPage() {
                 type="submit"
               >
                 {isSubmitting
-                  ? "Submitting..."
+                  ? t.common.submitting
                   : authMode === "register"
-                    ? "Register and continue"
-                    : "Sign in"}
+                    ? copy.registerAndContinue
+                    : copy.signIn}
               </button>
               <button
                 className="block text-sm font-medium text-gray-500 transition hover:text-gray-900"
@@ -363,24 +388,24 @@ export default function OnboardingPage() {
                 type="button"
               >
                 {authMode === "register"
-                  ? "Already registered? Sign in"
-                  : "Need a new account? Register"}
+                  ? copy.switchToLogin
+                  : copy.switchToRegister}
               </button>
             </form>
 
             <section className="space-y-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
               <div>
                 <p className="text-sm font-medium uppercase tracking-wide text-gray-500">
-                  Research switcher
+                  {copy.researchSwitcher}
                 </p>
                 <h2 className="mt-1 text-xl font-semibold text-gray-950">
-                  Existing Agent view
+                  {copy.existingAgentView}
                 </h2>
               </div>
               <div className="flex flex-col gap-3 sm:flex-row">
                 <label className="block flex-1">
                   <span className="text-sm font-medium text-gray-700">
-                    Admin key
+                    {t.common.adminKey}
                   </span>
                   <input
                     className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
@@ -389,9 +414,7 @@ export default function OnboardingPage() {
                     onChange={(event) => {
                       setAdminKey(event.target.value);
                       setAgentChoices([]);
-                      setAgentChoiceStatus(
-                        "Enter the admin key, then load the existing Agent list.",
-                      );
+                      setAgentChoiceStatus({ type: "instructions" });
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
@@ -408,11 +431,13 @@ export default function OnboardingPage() {
                     onClick={loadAgentChoices}
                     type="button"
                   >
-                    {isLoadingAgents ? "Loading..." : "Load agents"}
+                    {isLoadingAgents ? t.common.loading : copy.loadAgents}
                   </button>
                 </div>
               </div>
-              <p className="text-sm text-gray-500">{agentChoiceStatus}</p>
+              <p className="text-sm text-gray-500">
+                {formatAgentChoiceStatus(agentChoiceStatus, copy)}
+              </p>
 
               {agentChoices.length > 0 ? (
                 <div className="divide-y divide-gray-100 overflow-hidden rounded-xl border border-gray-200">
@@ -426,7 +451,8 @@ export default function OnboardingPage() {
                           {choice.agent.agent_name}
                         </p>
                         <p className="text-sm text-gray-500">
-                          @{choice.user.username} · user #{choice.user.id} · agent #
+                          @{choice.user.username} · {copy.userMeta} #{choice.user.id} ·{" "}
+                          {copy.agentMeta} #
                           {choice.agent.id}
                         </p>
                       </div>
@@ -437,8 +463,8 @@ export default function OnboardingPage() {
                         type="button"
                       >
                         {enteringAgentId === choice.agent.id
-                          ? "Entering..."
-                          : "Enter view"}
+                          ? copy.entering
+                          : copy.enterView}
                       </button>
                     </div>
                   ))}
@@ -452,7 +478,7 @@ export default function OnboardingPage() {
             className="space-y-7 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
           >
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">MBTI</span>
+              <span className="text-sm font-medium text-gray-700">{copy.mbti}</span>
               <input
                 className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 uppercase outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                 maxLength={16}
@@ -464,8 +490,9 @@ export default function OnboardingPage() {
             </label>
 
             <ScoreGroup
-              title="Big Five"
+              title={copy.bigFive}
               fields={bigFiveFields}
+              labels={copy.scoreLabels}
               values={bigFiveScores}
               onChange={(key, value) =>
                 setBigFiveScores((current) => ({ ...current, [key]: value }))
@@ -473,8 +500,9 @@ export default function OnboardingPage() {
             />
 
             <ScoreGroup
-              title="Schwartz Values"
+              title={copy.schwartzValues}
               fields={schwartzFields}
+              labels={copy.scoreLabels}
               values={schwartzValues}
               onChange={(key, value) =>
                 setSchwartzValues((current) => ({ ...current, [key]: value }))
@@ -483,13 +511,13 @@ export default function OnboardingPage() {
 
             <label className="block">
               <span className="text-sm font-medium text-gray-700">
-                Digital autobiography / core values
+                {copy.autobiographyLabel}
               </span>
               <textarea
                 className="mt-2 min-h-40 w-full resize-y rounded-xl border border-gray-200 px-4 py-3 text-sm leading-6 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                 value={autobiography}
                 onChange={(event) => setAutobiography(event.target.value)}
-                placeholder="Write your digital autobiography / core values. This will become the soul tone of your Agent."
+                placeholder={copy.autobiographyPlaceholder}
               />
             </label>
 
@@ -498,7 +526,7 @@ export default function OnboardingPage() {
               disabled={isSubmitting}
               type="submit"
             >
-              {isSubmitting ? "Generating..." : "Generate my Agent"}
+              {isSubmitting ? copy.generating : copy.generateAgent}
             </button>
           </form>
         )}
@@ -510,11 +538,13 @@ export default function OnboardingPage() {
 function ScoreGroup({
   title,
   fields,
+  labels,
   values,
   onChange,
 }: {
   title: string;
   fields: readonly ScoreField[];
+  labels: Record<string, string>;
   values: Record<string, number>;
   onChange: (key: string, value: number) => void;
 }) {
@@ -522,10 +552,10 @@ function ScoreGroup({
     <section>
       <h2 className="mb-4 text-lg font-semibold text-gray-950">{title}</h2>
       <div className="space-y-4">
-        {fields.map(([key, label]) => (
+        {fields.map((key) => (
           <label key={key} className="block rounded-xl bg-gray-50 p-4">
             <div className="mb-2 flex items-center justify-between text-sm">
-              <span className="font-medium text-gray-700">{label}</span>
+              <span className="font-medium text-gray-700">{labels[key]}</span>
               <span className="font-mono text-gray-500">{values[key]}</span>
             </div>
             <input

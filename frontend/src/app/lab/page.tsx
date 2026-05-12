@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
+import { useLanguage } from "@/components/LanguageContext";
 import {
   API_BASE_URL,
   Agent,
@@ -14,19 +16,50 @@ import { LoopSession, getAccessToken, loadSession, saveSession } from "@/lib/ses
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
 
 type ExportKind = "chatlogs" | "feedbacks";
+type BranchPurgeResult = {
+  branch_id: string;
+  events_deleted: number;
+  posts_deleted: number;
+  chat_logs_deleted: number;
+  feedback_logs_deleted: number;
+  post_ids: number[];
+  feedback_log_ids: number[];
+  verification: Record<string, number>;
+  is_clean: boolean;
+  deletion_log: string[];
+  message: string;
+};
+
+const DEFAULT_BRANCH_ID = "main";
+const BRANCHES_ENDPOINT = "/api/simulation/branches";
+const PURGE_BRANCH_ENDPOINT = "/api/admin/purge-branch";
+
+const SIMULATE_USER_POST_ENDPOINT = (username: string, branchId: string) =>
+  `/api/simulate/user/${encodeURIComponent(username)}/post?branch_id=${encodeURIComponent(
+    branchId,
+  )}`;
+
+const SIMULATE_TICK_ENDPOINT = (branchId: string) =>
+  `/api/simulate/tick?branch_id=${encodeURIComponent(branchId)}`;
 
 export default function LabPage() {
   const router = useRouter();
+  const { t } = useLanguage();
+  const copy = t.lab;
   const [session, setSession] = useState<LoopSession | null>(null);
   const [adminKey, setAdminKey] = useState("");
   const [targetAgentId, setTargetAgentId] = useState("");
   const [targetUsername, setTargetUsername] = useState("");
+  const [targetBranch, setTargetBranch] = useState(DEFAULT_BRANCH_ID);
+  const [purgeBranchId, setPurgeBranchId] = useState(DEFAULT_BRANCH_ID);
+  const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [singlePost, setSinglePost] = useState<PostOut | null>(null);
   const [tickPosts, setTickPosts] = useState<PostOut[]>([]);
   const [exportPreview, setExportPreview] = useState("");
   const [exportMeta, setExportMeta] = useState("");
+  const [purgeResult, setPurgeResult] = useState<BranchPurgeResult | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
@@ -34,6 +67,8 @@ export default function LabPage() {
   const [isTicking, setIsTicking] = useState(false);
   const [isExporting, setIsExporting] = useState<ExportKind | null>(null);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [isPurgingBranch, setIsPurgingBranch] = useState(false);
 
   const hasAdminKey = useMemo(() => adminKey.trim().length > 0, [adminKey]);
 
@@ -47,6 +82,7 @@ export default function LabPage() {
 
       setSession(storedSession);
       setTargetUsername(storedSession.username);
+      void loadBranches();
       if (storedSession.agent_id) {
         setTargetAgentId(String(storedSession.agent_id));
         return;
@@ -63,7 +99,7 @@ export default function LabPage() {
         setSession(hydratedSession);
         setTargetAgentId(String(agent.id));
       } catch {
-        setError("No Agent found for this session yet.");
+        setError(copy.noAgentForSession);
       }
     }
 
@@ -74,6 +110,32 @@ export default function LabPage() {
     return {
       "X-Loop-Admin-Key": adminKey.trim(),
     };
+  }
+
+  async function loadBranches() {
+    setIsLoadingBranches(true);
+    try {
+      const result = await apiRequest<unknown>(BRANCHES_ENDPOINT);
+      const branchList = normalizeBranches(result);
+      setBranches(branchList);
+      if (!branchList.includes(targetBranch)) {
+        setTargetBranch(DEFAULT_BRANCH_ID);
+      }
+      if (!branchList.includes(purgeBranchId)) {
+        setPurgeBranchId(DEFAULT_BRANCH_ID);
+      }
+    } catch (err) {
+      setBranches([DEFAULT_BRANCH_ID]);
+      setTargetBranch(DEFAULT_BRANCH_ID);
+      setPurgeBranchId(DEFAULT_BRANCH_ID);
+      setError(
+        err instanceof Error
+          ? t.common.branchUnavailable(err.message)
+          : t.common.branchUnavailable(),
+      );
+    } finally {
+      setIsLoadingBranches(false);
+    }
   }
 
   async function loadAgentChoices() {
@@ -92,9 +154,9 @@ export default function LabPage() {
         },
       );
       setAgentChoices(choices);
-      setMessage(`Loaded ${choices.length} Agent choice(s).`);
+      setMessage(copy.loadedChoices(choices.length));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load agents.");
+      setError(err instanceof Error ? err.message : copy.loadAgentsFailed);
     } finally {
       setIsLoadingAgents(false);
     }
@@ -112,6 +174,17 @@ export default function LabPage() {
     setTargetUsername(choice.user.username);
   }
 
+  function updateTargetBranch(branchId: string) {
+    setTargetBranch(branchId.trim() || DEFAULT_BRANCH_ID);
+    setSinglePost(null);
+    setTickPosts([]);
+    setExportPreview("");
+    setExportMeta("");
+    setPurgeResult(null);
+    setMessage("");
+    setError("");
+  }
+
   async function checkHealth() {
     setError("");
     setMessage("");
@@ -119,9 +192,9 @@ export default function LabPage() {
     try {
       const result = await apiRequest<HealthResponse>("/health");
       setHealth(result);
-      setMessage("Backend health check succeeded.");
+      setMessage(copy.healthSucceeded);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Health check failed.");
+      setError(err instanceof Error ? err.message : copy.healthFailed);
     } finally {
       setIsCheckingHealth(false);
     }
@@ -138,16 +211,16 @@ export default function LabPage() {
     setIsSimulatingOne(true);
     try {
       const post = await apiRequest<PostOut>(
-        `/api/simulate/user/${encodeURIComponent(targetUsername.trim())}/post`,
+        SIMULATE_USER_POST_ENDPOINT(targetUsername.trim(), targetBranch),
         {
           method: "POST",
           headers: adminHeaders(),
         },
       );
       setSinglePost(post);
-      setMessage(`Generated one simulated post for @${targetUsername.trim()}.`);
+      setMessage(copy.generatedOne(targetUsername.trim(), targetBranch));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Single-agent simulation failed.");
+      setError(err instanceof Error ? err.message : copy.singleSimulationFailed);
     } finally {
       setIsSimulatingOne(false);
     }
@@ -162,14 +235,17 @@ export default function LabPage() {
     setMessage("");
     setIsTicking(true);
     try {
-      const posts = await apiRequest<PostOut[]>("/api/simulate/tick", {
-        method: "POST",
-        headers: adminHeaders(),
-      });
+      const posts = await apiRequest<PostOut[]>(
+        SIMULATE_TICK_ENDPOINT(targetBranch),
+        {
+          method: "POST",
+          headers: adminHeaders(),
+        },
+      );
       setTickPosts(posts);
-      setMessage(`Simulation tick created ${posts.length} post(s).`);
+      setMessage(copy.tickCreated(posts.length, targetBranch));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Simulation tick failed.");
+      setError(err instanceof Error ? err.message : copy.tickFailed);
     } finally {
       setIsTicking(false);
     }
@@ -187,7 +263,7 @@ export default function LabPage() {
       const response = await fetch(
         `${API_BASE_URL}/api/export/by-username/${encodeURIComponent(
           targetUsername.trim(),
-        )}/${kind}`,
+        )}/${kind}?branch_id=${encodeURIComponent(targetBranch)}`,
         {
           headers: {
             ...adminHeaders(),
@@ -201,22 +277,58 @@ export default function LabPage() {
       }
 
       const text = await response.text();
-      const filename = `loop_user_${targetUsername.trim()}_${kind}.jsonl`;
+      const filename = `loop_user_${targetUsername.trim()}_${targetBranch}_${kind}.jsonl`;
       downloadText(filename, text);
       setExportPreview(text.split("\n").slice(0, 8).join("\n"));
-      setExportMeta(`${filename} · ${text.length.toLocaleString()} characters`);
-      setMessage(`Exported ${kind} for @${targetUsername.trim()}.`);
+      setExportMeta(
+        `${filename} · ${text.length.toLocaleString()} ${t.common.characters}`,
+      );
+      setMessage(copy.exported(kind, targetUsername.trim(), targetBranch));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Export failed.");
+      setError(err instanceof Error ? err.message : copy.exportFailed);
     } finally {
       setIsExporting(null);
+    }
+  }
+
+  async function purgeBranch() {
+    if (!hasAdminKey || !purgeBranchId || purgeBranchId === DEFAULT_BRANCH_ID) {
+      return;
+    }
+    if (!window.confirm(copy.purgeConfirm)) {
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setIsPurgingBranch(true);
+    try {
+      const result = await apiRequest<BranchPurgeResult>(PURGE_BRANCH_ENDPOINT, {
+        method: "POST",
+        headers: adminHeaders(),
+        body: JSON.stringify({ branch_id: purgeBranchId }),
+      });
+
+      setSinglePost(null);
+      setTickPosts([]);
+      setExportPreview("");
+      setExportMeta("");
+      setTargetBranch(DEFAULT_BRANCH_ID);
+      setPurgeBranchId(DEFAULT_BRANCH_ID);
+      setPurgeResult(result);
+      setMessage(result.message);
+      await loadBranches();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.purgeFailed);
+    } finally {
+      setIsPurgingBranch(false);
     }
   }
 
   if (!session) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
-        <p className="text-sm text-gray-500">Loading lab console...</p>
+        <p className="text-sm text-gray-500">{copy.loading}</p>
       </main>
     );
   }
@@ -226,20 +338,20 @@ export default function LabPage() {
       <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
         <header className="mb-6 border-b border-gray-200 pb-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-            Lab Console
+            {copy.eyebrow}
           </p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight text-gray-950">
-            后端功能测试台
+            {copy.title}
           </h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-gray-500">
-            集中测试健康检查、自动仿真发帖、全体 tick，以及研究数据 JSONL 导出。
+            {copy.subtitle}
           </p>
           <p className="mt-2 text-sm text-gray-400">
-            Signed in as{" "}
+            {t.common.signedInAs}{" "}
             <span className="font-medium text-gray-600">@{session.username}</span>
             {" · "}
             <span className="font-medium text-gray-600">
-              {session.agent_name ?? "No Agent yet"}
+              {session.agent_name ?? t.common.noAgentYet}
             </span>
           </p>
         </header>
@@ -256,36 +368,40 @@ export default function LabPage() {
         ) : null}
 
         <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px_220px_auto]">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_190px_220px_220px_auto]">
             <label className="block">
               <span className="text-sm font-medium text-gray-700">
-                Admin API key
+                {t.common.adminApiKey}
               </span>
               <input
                 className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
                 onChange={(event) => setAdminKey(event.target.value)}
-                placeholder="Required for simulation and export endpoints"
+                placeholder={copy.adminPlaceholder}
                 type="password"
                 value={adminKey}
               />
             </label>
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">Username</span>
+              <span className="text-sm font-medium text-gray-700">
+                {t.common.username}
+              </span>
               <input
                 className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
                 onChange={(event) => setTargetUsername(event.target.value)}
-                placeholder="participant username"
+                placeholder={copy.participantPlaceholder}
                 value={targetUsername}
               />
             </label>
             <label className="block">
-              <span className="text-sm font-medium text-gray-700">Agent picker</span>
+              <span className="text-sm font-medium text-gray-700">
+                {copy.agentPicker}
+              </span>
               <select
                 className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
                 onChange={(event) => chooseAgent(event.target.value)}
                 value={targetAgentId}
               >
-                <option value="">Choose loaded Agent</option>
+                <option value="">{t.common.chooseLoadedAgent}</option>
                 {agentChoices.map((choice) => (
                   <option key={choice.agent.id} value={choice.agent.id}>
                     @{choice.user.username} · {choice.agent.agent_name}
@@ -293,6 +409,16 @@ export default function LabPage() {
                 ))}
               </select>
             </label>
+            <BranchSelector
+              branches={branches}
+              label={copy.targetBranch}
+              loadingLabel={t.common.loading}
+              refreshLabel={t.common.refreshBranches}
+              isLoading={isLoadingBranches}
+              onChange={updateTargetBranch}
+              onRefresh={loadBranches}
+              value={targetBranch}
+            />
             <div className="flex items-end">
               <button
                 className="w-full rounded-full bg-gray-950 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
@@ -300,7 +426,7 @@ export default function LabPage() {
                 onClick={loadAgentChoices}
                 type="button"
               >
-                {isLoadingAgents ? "Loading..." : "Load agents"}
+                {isLoadingAgents ? t.common.loading : copy.loadAgents}
               </button>
             </div>
           </div>
@@ -311,10 +437,10 @@ export default function LabPage() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-gray-950">
-                  Backend health
+                  {copy.backendHealth}
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-500">
-                  测试 `GET /health`，确认 FastAPI 服务可达。
+                  {copy.backendHealthDescription}
                 </p>
               </div>
               <button
@@ -323,27 +449,27 @@ export default function LabPage() {
                 onClick={checkHealth}
                 type="button"
               >
-                {isCheckingHealth ? "Checking..." : "Check health"}
+                {isCheckingHealth ? copy.checking : copy.checkHealth}
               </button>
             </div>
             {health ? (
               <dl className="mt-4 grid grid-cols-2 gap-3">
-                <Metric label="status" value={health.status} />
-                <Metric label="service" value={health.service} />
+                <Metric label={copy.metricStatus} value={health.status} />
+                <Metric label={copy.metricService} value={health.service} />
               </dl>
             ) : (
               <p className="mt-4 text-sm text-gray-500">
-                点击后会显示后端健康检查响应。
+                {copy.backendHealthEmpty}
               </p>
             )}
           </section>
 
           <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-950">
-              Research exports
+              {copy.exports}
             </h2>
             <p className="mt-1 text-sm leading-6 text-gray-500">
-              测试 JSONL 导出接口，并在页面预览前几行。
+              {copy.exportsDescription}
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <button
@@ -352,7 +478,7 @@ export default function LabPage() {
                 onClick={() => exportJsonl("chatlogs")}
                 type="button"
               >
-                {isExporting === "chatlogs" ? "Exporting..." : "Export chatlogs"}
+                {isExporting === "chatlogs" ? copy.exporting : copy.exportChatlogs}
               </button>
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
@@ -360,17 +486,17 @@ export default function LabPage() {
                 onClick={() => exportJsonl("feedbacks")}
                 type="button"
               >
-                {isExporting === "feedbacks" ? "Exporting..." : "Export feedbacks"}
+                {isExporting === "feedbacks" ? copy.exporting : copy.exportFeedbacks}
               </button>
             </div>
             {exportMeta ? (
               <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
                 <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                  Last export
+                  {copy.lastExport}
                 </p>
                 <p className="mt-1 text-sm font-medium text-gray-700">{exportMeta}</p>
                 <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-xs leading-5 text-gray-700">
-                  {exportPreview || "(empty file)"}
+                  {exportPreview || `(${t.common.emptyFile})`}
                 </pre>
               </div>
             ) : null}
@@ -381,10 +507,10 @@ export default function LabPage() {
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold text-gray-950">
-                    Single Agent simulation
+                    {copy.singleSimulation}
                   </h2>
                   <p className="mt-1 text-sm leading-6 text-gray-500">
-                    测试 `POST /api/simulate/user/{targetUsername || "username"}/post`。
+                    {copy.singleSimulationDescription}
                   </p>
                 </div>
                 <button
@@ -392,7 +518,7 @@ export default function LabPage() {
                   disabled={!hasAdminKey || !targetUsername || isSimulatingOne}
                   type="submit"
                 >
-                  {isSimulatingOne ? "Generating..." : "Generate post"}
+                  {isSimulatingOne ? copy.generating : copy.generatePost}
                 </button>
               </div>
             </form>
@@ -403,10 +529,10 @@ export default function LabPage() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-gray-950">
-                  Global simulation tick
+                  {copy.globalTick}
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-500">
-                  测试 `POST /api/simulate/tick`，让所有 Agent 自动发帖一轮。
+                  {copy.globalTickDescription}
                 </p>
               </div>
               <button
@@ -415,7 +541,7 @@ export default function LabPage() {
                 onClick={simulateTick}
                 type="button"
               >
-                {isTicking ? "Running..." : "Run tick"}
+                {isTicking ? copy.running : copy.runTick}
               </button>
             </div>
             <div className="mt-4 space-y-3">
@@ -423,12 +549,104 @@ export default function LabPage() {
                 tickPosts.map((post) => <PostPreview key={post.id} post={post} />)
               ) : (
                 <p className="text-sm text-gray-500">
-                  运行 tick 后会显示本轮生成的帖子。
+                  {copy.tickEmpty}
                 </p>
               )}
             </div>
           </section>
         </div>
+
+        <section className="mt-6 rounded-xl border border-rose-300 bg-rose-50 p-5 shadow-sm">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-xs font-semibold uppercase tracking-wide text-rose-600">
+                {copy.danger}
+              </p>
+              <h2 className="mt-2 text-lg font-semibold text-rose-950">
+                {copy.purgeTitle}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-rose-700">
+                {copy.purgeDescription}
+              </p>
+            </div>
+            <div className="grid w-full gap-3 sm:grid-cols-[minmax(0,1fr)_auto] lg:max-w-xl">
+              <label className="block">
+                <span className="text-sm font-medium text-rose-900">
+                  {copy.branchToPurge}
+                </span>
+                <select
+                  className="mt-2 w-full rounded-xl border border-rose-200 bg-white px-4 py-3 text-sm text-rose-950 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
+                  disabled={isLoadingBranches || isPurgingBranch}
+                  onChange={(event) => setPurgeBranchId(event.target.value)}
+                  value={purgeBranchId}
+                >
+                  {branches.map((branchId) => (
+                    <option key={branchId} value={branchId}>
+                      {branchId === DEFAULT_BRANCH_ID
+                        ? `${branchId} (${t.common.protected})`
+                        : branchId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex items-end">
+                <button
+                  className="w-full rounded-full bg-rose-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+                  disabled={
+                    !hasAdminKey ||
+                    purgeBranchId === DEFAULT_BRANCH_ID ||
+                    isPurgingBranch
+                  }
+                  onClick={purgeBranch}
+                  type="button"
+                >
+                  {isPurgingBranch
+                    ? copy.purging
+                    : copy.purgeData}
+                </button>
+              </div>
+            </div>
+          </div>
+          {purgeResult ? (
+            <div className="mt-5 rounded-lg border border-rose-200 bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-rose-500">
+                    {copy.lastPurgeLog}
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-rose-950">
+                    {purgeResult.branch_id} ·{" "}
+                    {purgeResult.is_clean ? copy.clean : copy.needsReview}
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    purgeResult.is_clean
+                      ? "bg-emerald-50 text-emerald-700"
+                      : "bg-amber-50 text-amber-700"
+                  }`}
+                >
+                  {purgeResult.is_clean ? copy.verifiedClean : copy.residualRecords}
+                </span>
+              </div>
+              <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <Metric label={copy.metricEventsDeleted} value={purgeResult.events_deleted} />
+                <Metric label={copy.metricPostsDeleted} value={purgeResult.posts_deleted} />
+                <Metric
+                  label={copy.metricChatLogsDeleted}
+                  value={purgeResult.chat_logs_deleted}
+                />
+                <Metric
+                  label={copy.metricFeedbacksDeleted}
+                  value={purgeResult.feedback_logs_deleted}
+                />
+              </dl>
+              <pre className="mt-4 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg bg-rose-950 p-3 text-xs leading-5 text-rose-50">
+                {purgeResult.deletion_log.join("\n")}
+              </pre>
+            </div>
+          ) : null}
+        </section>
       </div>
     </main>
   );
@@ -453,6 +671,7 @@ function PostPreview({ post }: { post: PostOut }) {
       <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
         <span className="font-semibold text-gray-700">Post #{post.id}</span>
         <span>Agent #{post.agent_id}</span>
+        {post.branch_id ? <span>{post.branch_id}</span> : null}
         <time
           dateTime={parseUtcTimestamp(post.timestamp).toISOString()}
           title={formatLocalDateTime(post.timestamp)}
@@ -477,4 +696,42 @@ function downloadText(filename: string, text: string) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function normalizeBranches(result: unknown) {
+  const rawBranches =
+    result && typeof result === "object"
+      ? "branch_ids" in result
+        ? (result as { branch_ids?: unknown }).branch_ids
+        : "branches" in result
+          ? (result as { branches?: unknown }).branches
+          : result
+      : result;
+
+  const branches = Array.isArray(rawBranches)
+    ? rawBranches
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "branch_id" in item) {
+            return String((item as { branch_id: unknown }).branch_id);
+          }
+          return "";
+        })
+        .map((branchId) => branchId.trim())
+        .filter(Boolean)
+    : [];
+
+  return Array.from(new Set([DEFAULT_BRANCH_ID, ...branches])).sort(
+    (left, right) => {
+      if (left === DEFAULT_BRANCH_ID) {
+        return -1;
+      }
+      if (right === DEFAULT_BRANCH_ID) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    },
+  );
 }

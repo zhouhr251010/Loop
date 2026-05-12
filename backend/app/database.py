@@ -34,12 +34,47 @@ def ensure_sqlite_schema() -> None:
     """Apply small SQLite schema upgrades that create_all cannot perform."""
     inspector = inspect(engine)
     table_names = inspector.get_table_names()
-    if "users" not in table_names:
-        return
 
-    user_columns = {column["name"] for column in inspector.get_columns("users")}
     with engine.begin() as connection:
-        if "autobiography" not in user_columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN autobiography TEXT"))
-        if "core_memory" not in user_columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN core_memory JSON"))
+        if "users" in table_names:
+            user_columns = {column["name"] for column in inspector.get_columns("users")}
+            if "autobiography" not in user_columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN autobiography TEXT"))
+            if "core_memory" not in user_columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN core_memory JSON"))
+
+        if "chat_logs" in table_names:
+            chat_log_columns = {
+                column["name"] for column in inspector.get_columns("chat_logs")
+            }
+            if "branch_id" not in chat_log_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE chat_logs "
+                        "ADD COLUMN branch_id VARCHAR(128) NOT NULL DEFAULT 'main'",
+                    ),
+                )
+
+        if "event_logs" in table_names:
+            connection.execute(
+                text(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS event_logs_no_update
+                    BEFORE UPDATE ON event_logs
+                    BEGIN
+                        SELECT RAISE(ABORT, 'event_logs are append-only');
+                    END
+                    """,
+                ),
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TRIGGER IF NOT EXISTS event_logs_no_delete
+                    BEFORE DELETE ON event_logs
+                    BEGIN
+                        SELECT RAISE(ABORT, 'event_logs are append-only');
+                    END
+                    """,
+                ),
+            )

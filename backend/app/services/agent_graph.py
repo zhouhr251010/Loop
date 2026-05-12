@@ -47,16 +47,38 @@ DEFAULT_CHAT_REASONING_EFFORT = os.getenv(
     "DEEPSEEK_CHAT_REASONING_EFFORT",
     DEFAULT_REASONING_EFFORT,
 )
+DEFAULT_GRAPH_SUMMARY_MODEL = os.getenv(
+    "DEEPSEEK_GRAPH_SUMMARY_MODEL",
+    DEFAULT_CHAT_MODEL,
+)
+DEFAULT_GRAPH_SUMMARY_THINKING_MODE = os.getenv(
+    "DEEPSEEK_GRAPH_SUMMARY_THINKING",
+    "disabled",
+)
+DEFAULT_GRAPH_SUMMARY_REASONING_EFFORT = os.getenv(
+    "DEEPSEEK_GRAPH_SUMMARY_REASONING_EFFORT",
+    DEFAULT_REASONING_EFFORT,
+)
 DEFAULT_TOPIC = "日常闲聊"
-ACTIVE_TOPIC_CONTEXT_MESSAGES = 20
-TOPIC_RETAINED_MESSAGES = 20
-TOPIC_COMPRESSION_THRESHOLD = 40
+SHORT_TERM_MEMORY_MESSAGE_LIMIT = 10
+SUMMARY_INPUT_MESSAGE_LIMIT = 30
+MAX_CONTEXT_MESSAGE_CHARS = 1600
+ACTIVE_TOPIC_CONTEXT_MESSAGES = SHORT_TERM_MEMORY_MESSAGE_LIMIT
+TOPIC_RETAINED_MESSAGES = SHORT_TERM_MEMORY_MESSAGE_LIMIT
+TOPIC_COMPRESSION_THRESHOLD = SHORT_TERM_MEMORY_MESSAGE_LIMIT
 MAX_TOPIC_NAME_CHARS = 24
 
 
 def _float_env(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
     except ValueError:
         return default
 
@@ -70,6 +92,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 DEFAULT_LLM_TIMEOUT_SECONDS = _float_env("LOOP_LLM_TIMEOUT_SECONDS", 8.0)
 DEFAULT_CHAT_TIMEOUT_SECONDS = _float_env("LOOP_CHAT_LLM_TIMEOUT_SECONDS", 25.0)
+GRAPH_CHAT_MAX_TOKENS = _int_env("LOOP_GRAPH_CHAT_MAX_TOKENS", 900)
+GRAPH_SUMMARY_MAX_TOKENS = _int_env("LOOP_GRAPH_SUMMARY_MAX_TOKENS", 900)
+GRAPH_TOPIC_MAX_TOKENS = _int_env("LOOP_GRAPH_TOPIC_MAX_TOKENS", 64)
+GRAPH_INTENT_MAX_TOKENS = _int_env("LOOP_GRAPH_INTENT_MAX_TOKENS", 300)
+MAX_CONTEXT_MESSAGE_CHARS = _int_env("LOOP_GRAPH_CONTEXT_MESSAGE_CHARS", 1600)
 CORE_MEMORY_INTENT_LLM_ENABLED = _env_flag(
     "LOOP_CORE_MEMORY_INTENT_LLM_ENABLED",
     default=False,
@@ -117,7 +144,7 @@ def _build_llm() -> ChatOpenAI:
         "api_key": api_key,
         "base_url": DEEPSEEK_BASE_URL,
         "model": DEFAULT_CHAT_MODEL,
-        "max_tokens": 240,
+        "max_tokens": GRAPH_CHAT_MAX_TOKENS,
         "timeout": DEFAULT_CHAT_TIMEOUT_SECONDS,
     }
     if reasoning_effort:
@@ -136,20 +163,20 @@ def _build_post_llm() -> ChatOpenAI:
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured.")
 
-    thinking_mode = DEFAULT_THINKING_MODE.strip().lower() or "disabled"
+    thinking_mode = DEFAULT_GRAPH_SUMMARY_THINKING_MODE.strip().lower() or "disabled"
     if thinking_mode not in {"enabled", "disabled"}:
         thinking_mode = "disabled"
     reasoning_effort = None
     if thinking_mode == "enabled":
-        effort = DEFAULT_REASONING_EFFORT.strip().lower() or "high"
+        effort = DEFAULT_GRAPH_SUMMARY_REASONING_EFFORT.strip().lower() or "high"
         reasoning_effort = effort if effort in {"high", "max"} else "high"
     extra_body = {"thinking": {"type": thinking_mode}} if thinking_mode == "enabled" else None
 
     kwargs = {
         "api_key": api_key,
         "base_url": DEEPSEEK_BASE_URL,
-        "model": DEFAULT_MODEL,
-        "max_tokens": 180,
+        "model": DEFAULT_GRAPH_SUMMARY_MODEL,
+        "max_tokens": GRAPH_SUMMARY_MAX_TOKENS,
         "timeout": DEFAULT_LLM_TIMEOUT_SECONDS,
     }
     if reasoning_effort:
@@ -165,8 +192,8 @@ def _build_post_llm() -> ChatOpenAI:
 llm = _build_llm()
 llm_with_tools = llm.bind_tools(AGENT_TOOLS)
 summary_llm = _build_post_llm()
-topic_llm = _build_llm().bind(max_tokens=24, temperature=0)
-intent_llm = _build_llm().bind(max_tokens=160, temperature=0)
+topic_llm = _build_llm().bind(max_tokens=GRAPH_TOPIC_MAX_TOKENS, temperature=0)
+intent_llm = _build_llm().bind(max_tokens=GRAPH_INTENT_MAX_TOKENS, temperature=0)
 memory_saver = MemorySaver()
 
 
@@ -190,6 +217,24 @@ def _message_content_to_text(message: BaseMessage) -> str:
     return str(content) if content is not None else ""
 
 
+def _truncate_context_text(text: str, limit: int = MAX_CONTEXT_MESSAGE_CHARS) -> str:
+    clean_text = (text or "").strip()
+    if len(clean_text) <= limit:
+        return clean_text
+    return f"{clean_text[:limit]}...[truncated]"
+
+
+def _trim_message_for_context(message: BaseMessage) -> BaseMessage:
+    """Bound individual message text before it can enter an LLM call."""
+    text = _message_content_to_text(message)
+    trimmed_text = _truncate_context_text(text)
+    if trimmed_text == text:
+        return message
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update={"content": trimmed_text})
+    return message.copy(update={"content": trimmed_text})
+
+
 def _message_role(message: BaseMessage) -> str:
     role = getattr(message, "type", None) or message.__class__.__name__
     return str(role)
@@ -197,8 +242,9 @@ def _message_role(message: BaseMessage) -> str:
 
 def _format_messages_for_summary(messages: Sequence[BaseMessage]) -> str:
     lines: list[str] = []
-    for index, message in enumerate(messages, start=1):
-        text = _message_content_to_text(message).strip()
+    bounded_messages = list(messages)[-SUMMARY_INPUT_MESSAGE_LIMIT:]
+    for index, message in enumerate(bounded_messages, start=1):
+        text = _truncate_context_text(_message_content_to_text(message))
         if text:
             lines.append(f"{index}. {_message_role(message)}: {text}")
     return "\n".join(lines)
@@ -655,10 +701,20 @@ def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
         )
         topic_summary_offsets[topic] = len(topic_messages)
 
-    active_context = working_memory.get(active_topic, [])[-ACTIVE_TOPIC_CONTEXT_MESSAGES:]
+    active_context = [
+        _trim_message_for_context(message)
+        for message in working_memory.get(active_topic, [])[
+            -ACTIVE_TOPIC_CONTEXT_MESSAGES:
+        ]
+    ]
+    incoming_context = [
+        _trim_message_for_context(message)
+        for message in incoming_messages
+    ]
     summary = _aggregate_topic_summaries(topic_summaries)
     logger.info(
         f"[Context Builder] Assembling context for topic. "
+        f"STM messages={len(active_context)} limit={ACTIVE_TOPIC_CONTEXT_MESSAGES}. "
         f"Excluded irrelevant histories.",
     )
 
@@ -671,7 +727,7 @@ def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
         "active_messages": [
             RemoveMessage(id=REMOVE_ALL_MESSAGES),
             *active_context,
-            *incoming_messages,
+            *incoming_context,
         ],
     }
 
@@ -726,7 +782,10 @@ def _build_state_monitor_prompt(state: AgentCognitiveState) -> str:
 
 
 def _messages_for_llm(state: AgentCognitiveState) -> list[BaseMessage]:
-    active_messages = _clean_message_list(state.get("active_messages") or [])
+    active_messages = [
+        _trim_message_for_context(message)
+        for message in _clean_message_list(state.get("active_messages") or [])
+    ][-(SHORT_TERM_MEMORY_MESSAGE_LIMIT + 6):]
     system_prompt = str(state.get("system_prompt") or "").strip()
 
     dynamic_system_prompt = "\n\n".join(

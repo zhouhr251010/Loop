@@ -74,6 +74,22 @@ class Agent(Base):
         foreign_keys="Relationship.agent_id_2",
     )
     reflection_events = relationship("ReflectionEvent", back_populates="agent")
+    event_logs = relationship("EventLog", back_populates="agent")
+
+
+class EventLog(Base):
+    """Append-only event store for reconstructing agent timelines."""
+
+    __tablename__ = "event_logs"
+
+    event_id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=utc_now_seconds, nullable=False, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    branch_id = Column(String(128), default="main", nullable=False, index=True)
+    event_type = Column(String(128), nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+
+    agent = relationship("Agent", back_populates="event_logs")
 
 
 class Relationship(Base):
@@ -143,6 +159,7 @@ class ChatLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    branch_id = Column(String(128), default="main", nullable=False, index=True)
     user_message = Column(Text, nullable=False)
     agent_reply = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=utc_now_seconds, nullable=False)

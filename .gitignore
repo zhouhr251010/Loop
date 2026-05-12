@@ -36,5 +36,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Logs and local OS/editor files
 *.log
+启动.txt
 .DS_Store
 Thumbs.db

@@ -1,6 +1,6 @@
 """Digital memory upload endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.crud import agent as agent_crud
@@ -24,10 +24,59 @@ from app.services.consolidation_service import (
     consolidate_daily_memory,
     inspect_graph_working_memory,
 )
+from app.services.core_memory_service import normalize_core_memory
 from app.services.rag_service import add_agent_chat_memories, add_memory, retrieve_memory
+from app.services.time_machine import TimeMachine
 
 
 router = APIRouter(tags=["memory"])
+
+
+def _normalize_branch_id(branch_id: str) -> str:
+    return (branch_id or "").strip() or "main"
+
+
+def _format_core_memory_fields(core_memory: dict[str, str]) -> str:
+    lines = [
+        f"{key}: {value.strip()}"
+        for key, value in core_memory.items()
+        if value.strip()
+    ]
+    return "\n".join(lines)
+
+
+def _branch_memory_state_payload(
+    agent_id: int,
+    branch_id: str,
+    db: Session,
+    current_user: models.User,
+) -> dict:
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    state = inspect_graph_working_memory(
+        agent_id=agent_id,
+        user_id=current_user.id,
+        branch_id=normalized_branch_id,
+    )
+    reconstructed_state = TimeMachine(db).reconstruct_state(
+        agent_id=agent_id,
+        target_timestamp=models.utc_now_seconds(),
+        branch_id=normalized_branch_id,
+    )
+    core_memory = normalize_core_memory(reconstructed_state.get("core_memory"))
+    current_core_memory = str(
+        reconstructed_state.get("current_core_memory") or "",
+    ).strip()
+
+    if normalized_branch_id == "main" and not current_core_memory:
+        core_memory = normalize_core_memory(current_user.core_memory)
+        current_core_memory = _format_core_memory_fields(core_memory)
+
+    return {
+        **state,
+        "branch_id": normalized_branch_id,
+        "core_memory": core_memory,
+        "current_core_memory": current_core_memory,
+    }
 
 
 def _require_current_agent(db: Session, current_user: models.User) -> models.Agent:
@@ -268,6 +317,7 @@ def import_agent_group_chat(
             user_id=current_user.id,
             target_agent_id=db_agent.id,
             messages=records,
+            branch_id="main",
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -295,12 +345,13 @@ def import_agent_group_chat(
     response_model=AgentWorkingMemoryOut,
 )
 def get_my_agent_working_memory_state(
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> AgentWorkingMemoryOut:
     """Inspect my Agent's short-term LangGraph memory checkpoint."""
     db_agent = _require_current_agent(db, current_user)
-    return get_agent_working_memory_state(db_agent.id, db, current_user)
+    return get_agent_working_memory_state(db_agent.id, branch_id, db, current_user)
 
 
 @router.get(
@@ -309,13 +360,14 @@ def get_my_agent_working_memory_state(
 )
 def get_agent_working_memory_state(
     agent_id: int,
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> AgentWorkingMemoryOut:
     """Inspect the Agent's short-term LangGraph memory checkpoint."""
     _require_owned_agent(agent_id, db, current_user)
     return AgentWorkingMemoryOut(
-        **inspect_graph_working_memory(agent_id=agent_id, user_id=current_user.id),
+        **_branch_memory_state_payload(agent_id, branch_id, db, current_user),
     )
 
 
@@ -324,12 +376,13 @@ def get_agent_working_memory_state(
     response_model=AgentWorkingMemoryOut,
 )
 def clear_my_agent_working_memory_state(
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> AgentWorkingMemoryOut:
     """Clear my Agent's short-term LangGraph working memory."""
     db_agent = _require_current_agent(db, current_user)
-    return clear_agent_working_memory_state(db_agent.id, db, current_user)
+    return clear_agent_working_memory_state(db_agent.id, branch_id, db, current_user)
 
 
 @router.post(
@@ -338,13 +391,28 @@ def clear_my_agent_working_memory_state(
 )
 def clear_agent_working_memory_state(
     agent_id: int,
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> AgentWorkingMemoryOut:
     """Manually clear the Agent's short-term LangGraph working memory."""
     _require_owned_agent(agent_id, db, current_user)
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    state = clear_graph_working_memory(
+        agent_id=agent_id,
+        user_id=current_user.id,
+        branch_id=normalized_branch_id,
+    )
     return AgentWorkingMemoryOut(
-        **clear_graph_working_memory(agent_id=agent_id, user_id=current_user.id),
+        **{
+            **_branch_memory_state_payload(
+                agent_id,
+                normalized_branch_id,
+                db,
+                current_user,
+            ),
+            **state,
+        },
     )
 
 
@@ -354,12 +422,19 @@ def clear_agent_working_memory_state(
 )
 def get_my_agent_relationships(
     include_candidates: bool = True,
+    limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[RelationshipOut]:
     """Return the directed social-affinity graph from my Agent's perspective."""
     db_agent = _require_current_agent(db, current_user)
-    return get_agent_relationships(db_agent.id, include_candidates, db, current_user)
+    return get_agent_relationships(
+        db_agent.id,
+        include_candidates,
+        limit,
+        db,
+        current_user,
+    )
 
 
 @router.get(
@@ -369,6 +444,7 @@ def get_my_agent_relationships(
 def get_agent_relationships(
     agent_id: int,
     include_candidates: bool = True,
+    limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[RelationshipOut]:
@@ -409,7 +485,7 @@ def get_agent_relationships(
         )
         for agent in target_agents
     ]
-    return sorted(rows, key=lambda row: row.affinity_score, reverse=True)
+    return sorted(rows, key=lambda row: row.affinity_score, reverse=True)[:limit]
 
 
 @router.get(
@@ -417,7 +493,7 @@ def get_agent_relationships(
     response_model=list[PersonalizedPostPreviewOut],
 )
 def get_my_personalized_feed_preview(
-    limit: int = 20,
+    limit: int = Query(5, ge=1, le=50),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[PersonalizedPostPreviewOut]:
@@ -432,13 +508,13 @@ def get_my_personalized_feed_preview(
 )
 def get_personalized_feed_preview(
     agent_id: int,
-    limit: int = 20,
+    limit: int = Query(5, ge=1, le=50),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[PersonalizedPostPreviewOut]:
     """Preview how social affinity creates a personalized/filter-bubble feed."""
     _require_owned_agent(agent_id, db, current_user)
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, 50))
     relationships = (
         db.query(models.Relationship)
         .filter(models.Relationship.agent_id_1 == agent_id)

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { AppProviders } from "@/components/AppProviders";
 import { NavBar } from "@/components/NavBar";
 import "./globals.css";
 
@@ -15,8 +16,10 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body>
-        <NavBar />
-        {children}
+        <AppProviders>
+          <NavBar />
+          {children}
+        </AppProviders>
       </body>
     </html>
   );

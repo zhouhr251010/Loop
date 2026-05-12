@@ -7,6 +7,11 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.models import utc_now_seconds
+from app.services.event_store import append_event
+
+RECENT_CHAT_HISTORY_TURNS = 3
+HISTORICAL_CHAT_LOG_MIN_TURNS = 5
+HISTORICAL_CHAT_LOG_MAX_TURNS = 50
 
 
 def _is_sqlite_busy(exc: OperationalError) -> bool:
@@ -19,17 +24,35 @@ def create_chat_log(
     agent_id: int,
     user_message: str,
     agent_reply: str,
+    branch_id: str = "main",
 ) -> models.ChatLog:
     """Persist a user-agent private chat turn with second-level precision."""
+    normalized_branch_id = (branch_id or "main").strip() or "main"
     for attempt in range(3):
+        timestamp = utc_now_seconds()
         db_chat_log = models.ChatLog(
             agent_id=agent_id,
+            branch_id=normalized_branch_id,
             user_message=user_message,
             agent_reply=agent_reply,
-            timestamp=utc_now_seconds(),
+            timestamp=timestamp,
         )
         db.add(db_chat_log)
         try:
+            db.flush()
+            append_event(
+                db,
+                agent_id=agent_id,
+                branch_id=normalized_branch_id,
+                event_type="MESSAGE_RECEIVED",
+                payload={
+                    "user_message": user_message,
+                    "agent_reply": agent_reply,
+                    "chat_log_id": db_chat_log.id,
+                },
+                timestamp=timestamp,
+                commit=False,
+            )
             db.commit()
             db.refresh(db_chat_log)
             return db_chat_log
@@ -40,3 +63,53 @@ def create_chat_log(
             sleep(0.15 * (attempt + 1))
 
     raise RuntimeError("Failed to persist chat log.")
+
+
+def get_recent_chat_logs(
+    db: Session,
+    agent_id: int,
+    branch_id: str = "main",
+    limit: int = RECENT_CHAT_HISTORY_TURNS,
+) -> list[models.ChatLog]:
+    """Return a bounded recent private-chat window in chronological order."""
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    safe_limit = max(1, min(limit, RECENT_CHAT_HISTORY_TURNS))
+    rows = (
+        db.query(models.ChatLog)
+        .filter(
+            models.ChatLog.agent_id == agent_id,
+            models.ChatLog.branch_id == normalized_branch_id,
+        )
+        .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    return list(reversed(rows))
+
+
+def get_historical_chat_logs(
+    db: Session,
+    agent_id: int,
+    branch_id: str = "main",
+    lookback_turns: int = HISTORICAL_CHAT_LOG_MIN_TURNS,
+    skip_recent_turns: int = RECENT_CHAT_HISTORY_TURNS,
+) -> list[models.ChatLog]:
+    """Return older branch-scoped chat turns for model tool lookups."""
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    safe_lookback = max(
+        HISTORICAL_CHAT_LOG_MIN_TURNS,
+        min(lookback_turns, HISTORICAL_CHAT_LOG_MAX_TURNS),
+    )
+    safe_skip = max(0, skip_recent_turns)
+    rows = (
+        db.query(models.ChatLog)
+        .filter(
+            models.ChatLog.agent_id == agent_id,
+            models.ChatLog.branch_id == normalized_branch_id,
+        )
+        .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
+        .offset(safe_skip)
+        .limit(safe_lookback)
+        .all()
+    )
+    return list(reversed(rows))

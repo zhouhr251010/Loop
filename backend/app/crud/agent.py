@@ -6,7 +6,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
+from app.models import utc_now_seconds
 from app.schemas.agent import AgentCreate
+from app.services.event_store import append_event
 
 
 def get_agent(db: Session, agent_id: int) -> models.Agent | None:
@@ -52,8 +54,22 @@ def build_system_prompt_base(user: models.User) -> str:
 
 def create_agent(db: Session, agent_in: AgentCreate) -> models.Agent:
     """Create a new virtual agent."""
+    timestamp = utc_now_seconds()
     db_agent = models.Agent(**agent_in.model_dump())
     db.add(db_agent)
+    db.flush()
+    append_event(
+        db,
+        agent_id=db_agent.id,
+        event_type="AGENT_CREATED",
+        payload={
+            "user_id": db_agent.user_id,
+            "agent_name": db_agent.agent_name,
+            "system_prompt_base": db_agent.system_prompt_base,
+        },
+        timestamp=timestamp,
+        commit=False,
+    )
     db.commit()
     db.refresh(db_agent)
     return db_agent
@@ -77,6 +93,18 @@ def create_or_update_agent_for_user(db: Session, user: models.User) -> models.Ag
 
     db_agent.agent_name = agent_name
     db_agent.system_prompt_base = system_prompt_base
+    append_event(
+        db,
+        agent_id=db_agent.id,
+        event_type="AGENT_PROFILE_UPDATED",
+        payload={
+            "user_id": user.id,
+            "agent_name": agent_name,
+            "system_prompt_base": system_prompt_base,
+            "core_memory": user.core_memory,
+        },
+        commit=False,
+    )
     db.commit()
     db.refresh(db_agent)
     return db_agent
