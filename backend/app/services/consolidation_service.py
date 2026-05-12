@@ -45,6 +45,80 @@ DAILY_RECORD_PROMPT_LIMIT = 120
 MAX_DAILY_RECORD_CHARS = 1000
 
 
+class ConsolidationLLMError(RuntimeError):
+    """Raised when sleep consolidation cannot safely complete an LLM step."""
+
+
+def _aborted_consolidation_result(
+    *,
+    user_id: int,
+    agent_id: int,
+    records_count: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Return a safe no-op sleep result after preserving short-term memory."""
+    return {
+        "message": (
+            "Agent sleep consolidation aborted; working memory was preserved "
+            f"for retry. Reason: {reason}"
+        ),
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "records_consolidated": records_count,
+        "chunks_added": 0,
+        "graph_triples_extracted": 0,
+        "daily_events_created": 0,
+        "high_level_insights_created": 0,
+        "core_memory_updated": False,
+        "relationship_updates": [],
+        "graph_memory_cleared": False,
+    }
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        logger.warning(
+            "[Sleep Consolidation] Invalid %s=%r; using %.1f.",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    return max(1.0, value)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning(
+            "[Sleep Consolidation] Invalid %s=%r; using %s.",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    return max(0, value)
+
+
+CONSOLIDATION_LLM_TIMEOUT_SECONDS = _env_float(
+    "LOOP_CONSOLIDATION_LLM_TIMEOUT_SECONDS",
+    60.0,
+)
+CONSOLIDATION_LLM_MAX_RETRIES = _env_int(
+    "LOOP_CONSOLIDATION_LLM_MAX_RETRIES",
+    0,
+)
+
+
 def _deepseek_extra_body() -> dict[str, dict[str, str]]:
     thinking_mode = DEFAULT_CONSOLIDATION_THINKING_MODE.strip().lower() or "disabled"
     if thinking_mode not in {"enabled", "disabled"}:
@@ -186,7 +260,8 @@ def _episodic_memory_text(
     return "\n".join([header, *records])
 
 
-def _extract_json_array(raw_text: str) -> list[Any]:
+def _parse_json_array_or_abort(raw_text: str, context: str) -> list[Any]:
+    """Parse a required LLM JSON array, aborting sleep on invalid output."""
     clean_text = raw_text.strip()
     fenced_match = re.search(r"```(?:json)?\s*(.*?)```", clean_text, re.DOTALL)
     if fenced_match:
@@ -194,16 +269,22 @@ def _extract_json_array(raw_text: str) -> list[Any]:
 
     try:
         parsed = json.loads(clean_text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         array_match = re.search(r"\[[\s\S]*\]", clean_text)
         if not array_match:
-            return []
+            raise ConsolidationLLMError(
+                f"{context} did not return a JSON array.",
+            ) from exc
         try:
             parsed = json.loads(array_match.group(0))
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as nested_exc:
+            raise ConsolidationLLMError(
+                f"{context} returned invalid JSON.",
+            ) from nested_exc
 
-    return parsed if isinstance(parsed, list) else []
+    if not isinstance(parsed, list):
+        raise ConsolidationLLMError(f"{context} did not return a JSON array.")
+    return parsed
 
 
 def _call_deepseek_json(
@@ -213,7 +294,7 @@ def _call_deepseek_json(
 ) -> str:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
-        return ""
+        raise ConsolidationLLMError("DEEPSEEK_API_KEY is not configured.")
 
     try:
         from openai import OpenAI
@@ -221,7 +302,8 @@ def _call_deepseek_json(
         client = OpenAI(
             api_key=api_key,
             base_url=DEEPSEEK_BASE_URL,
-            timeout=30.0,
+            timeout=CONSOLIDATION_LLM_TIMEOUT_SECONDS,
+            max_retries=CONSOLIDATION_LLM_MAX_RETRIES,
         )
         response = client.chat.completions.create(
             model=DEFAULT_CONSOLIDATION_MODEL,
@@ -232,9 +314,18 @@ def _call_deepseek_json(
             max_tokens=max_tokens,
             **_deepseek_request_options(),
         )
-        return response.choices[0].message.content or ""
-    except Exception:
-        return ""
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise ConsolidationLLMError("DeepSeek returned an empty response.")
+        return content
+    except Exception as exc:
+        if isinstance(exc, ConsolidationLLMError):
+            raise
+        logger.warning(
+            "[Sleep Consolidation] DeepSeek JSON call failed: %s",
+            exc,
+        )
+        raise ConsolidationLLMError("DeepSeek request failed during sleep.") from exc
 
 
 def _score_episodic_memories(
@@ -263,7 +354,7 @@ def _score_episodic_memories(
         max_tokens=1400,
     )
     scored_memories: list[dict[str, Any]] = []
-    for item in _extract_json_array(raw_text):
+    for item in _parse_json_array_or_abort(raw_text, "episodic memory scoring"):
         if not isinstance(item, dict):
             continue
         text = str(item.get("text") or "").strip()
@@ -287,15 +378,9 @@ def _score_episodic_memories(
     if scored_memories:
         return scored_memories
 
-    return [
-        {
-            "text": record,
-            "similarity": 0.55,
-            "importance": 0.55,
-            "time_decay": min(index / max(len(records), 1), 1.0) * 0.2,
-        }
-        for index, record in enumerate(records[-20:])
-    ]
+    raise ConsolidationLLMError(
+        "DeepSeek did not return any valid scored memories.",
+    )
 
 
 def _extract_graph_triples(
@@ -335,7 +420,7 @@ def _extract_graph_triples(
     )
     allowed_targets = {agent.id for agent in candidate_agents}
     triples: list[dict[str, Any]] = []
-    for item in _extract_json_array(raw_text):
+    for item in _parse_json_array_or_abort(raw_text, "social graph extraction"):
         if not isinstance(item, dict):
             continue
         try:
@@ -366,8 +451,7 @@ def _analyze_relationship_changes(
     records: list[str],
 ) -> list[dict[str, float | int]]:
     """Ask DeepSeek to infer directed social-affinity deltas from daily records."""
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key or not records or not candidate_agents:
+    if not records or not candidate_agents:
         return []
 
     candidate_lines = "\n".join(
@@ -389,33 +473,15 @@ def _analyze_relationship_changes(
         f"过去 24 小时记录：\n{record_text}"
     )
 
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=DEEPSEEK_BASE_URL,
-            timeout=20.0,
-        )
-        response = client.chat.completions.create(
-            model=DEFAULT_CONSOLIDATION_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是社会关系图谱分析器，只输出 JSON。",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=700,
-            **_deepseek_request_options(),
-        )
-        raw_text = response.choices[0].message.content or ""
-    except Exception:
-        return []
+    raw_text = _call_deepseek_json(
+        "你是社会关系图谱分析器，只输出 JSON。",
+        prompt,
+        max_tokens=700,
+    )
 
     allowed_targets = {agent.id for agent in candidate_agents}
     changes: list[dict[str, float | int]] = []
-    for item in _extract_json_array(raw_text):
+    for item in _parse_json_array_or_abort(raw_text, "relationship analysis"):
         if not isinstance(item, dict):
             continue
         try:
@@ -543,13 +609,13 @@ def _daily_event_summaries(
     )
     events = [
         str(item).strip()
-        for item in _extract_json_array(raw_text)
+        for item in _parse_json_array_or_abort(raw_text, "daily event summary")
         if str(item).strip()
     ]
     if events:
         return events[:5]
 
-    return records[-5:]
+    raise ConsolidationLLMError("DeepSeek did not return any daily events.")
 
 
 def _create_daily_events(
@@ -577,9 +643,20 @@ def _deep_reflect_on_events(
     events: list[models.ReflectionEvent],
 ) -> str:
     """Layer 3: infer high-level self traits and long-range patterns."""
+    return _deep_reflect_on_event_texts(
+        source_agent=source_agent,
+        event_texts=[event.content for event in events],
+    )
+
+
+def _deep_reflect_on_event_texts(
+    source_agent: models.Agent,
+    event_texts: list[str],
+) -> str:
+    """Layer 3: infer high-level self traits from planned event text."""
     event_text = "\n".join(
-        f"{index}. {event.content}"
-        for index, event in enumerate(events, start=1)
+        f"{index}. {event}"
+        for index, event in enumerate(event_texts, start=1)
     )
     prompt = (
         "回顾最近发生的这 5 件事，你能推断出关于自己的什么核心特质、"
@@ -594,7 +671,10 @@ def _deep_reflect_on_events(
         prompt,
         max_tokens=900,
     )
-    return raw_text.strip()[:2000]
+    insight = raw_text.strip()[:2000]
+    if not insight:
+        raise ConsolidationLLMError("DeepSeek did not return a reflection insight.")
+    return insight
 
 
 def _maybe_create_high_level_insight(
@@ -603,17 +683,7 @@ def _maybe_create_high_level_insight(
     user_id: int,
 ) -> tuple[int, bool]:
     """Layer 3 reflection trigger once enough Layer 2 events accumulate."""
-    pending_events = (
-        db.query(models.ReflectionEvent)
-        .filter(
-            models.ReflectionEvent.agent_id == source_agent.id,
-            models.ReflectionEvent.level == "daily_event",
-            models.ReflectionEvent.reflected_at.is_(None),
-        )
-        .order_by(models.ReflectionEvent.created_at.asc(), models.ReflectionEvent.id.asc())
-        .limit(REFLECTION_BATCH_SIZE)
-        .all()
-    )
+    pending_events = _pending_daily_events(db, source_agent)
     if len(pending_events) < REFLECTION_BATCH_SIZE:
         return 0, False
 
@@ -640,6 +710,83 @@ def _maybe_create_high_level_insight(
         event.reflected_at = now
     db.commit()
     merge_core_memory_insight(db=db, user_id=user_id, insight=insight)
+    return 1, True
+
+
+def _pending_daily_events(
+    db: Session,
+    source_agent: models.Agent,
+) -> list[models.ReflectionEvent]:
+    """Return the next unreflected daily events in reflection order."""
+    return (
+        db.query(models.ReflectionEvent)
+        .filter(
+            models.ReflectionEvent.agent_id == source_agent.id,
+            models.ReflectionEvent.level == "daily_event",
+            models.ReflectionEvent.reflected_at.is_(None),
+        )
+        .order_by(models.ReflectionEvent.created_at.asc(), models.ReflectionEvent.id.asc())
+        .limit(REFLECTION_BATCH_SIZE)
+        .all()
+    )
+
+
+def _plan_high_level_insight(
+    db: Session,
+    source_agent: models.Agent,
+    planned_daily_events: list[str],
+) -> str:
+    """Run reflection before persistence so failures cannot clear memory."""
+    pending_events = _pending_daily_events(db, source_agent)
+    reflection_texts = [
+        event.content
+        for event in pending_events
+    ]
+    reflection_texts.extend(planned_daily_events)
+    if len(reflection_texts) < REFLECTION_BATCH_SIZE:
+        return ""
+
+    logger.info(
+        f"[Reflection Triggered] Event count reached threshold. "
+        f"Initiating high-level reflection.",
+    )
+    insight = _deep_reflect_on_event_texts(
+        source_agent=source_agent,
+        event_texts=reflection_texts[:REFLECTION_BATCH_SIZE],
+    )
+    logger.info(f"[Insight Generated] \n{insight}")
+    return insight
+
+
+def _persist_high_level_insight(
+    db: Session,
+    source_agent: models.Agent,
+    user_id: int,
+    insight: str,
+) -> tuple[int, bool]:
+    """Persist a precomputed reflection insight and update core memory."""
+    clean_insight = (insight or "").strip()
+    if not clean_insight:
+        return 0, False
+
+    pending_events = _pending_daily_events(db, source_agent)
+    if len(pending_events) < REFLECTION_BATCH_SIZE:
+        return 0, False
+
+    now = utc_now_seconds()
+    db.add(
+        models.ReflectionEvent(
+            agent_id=source_agent.id,
+            level="high_level_insight",
+            content=clean_insight,
+            source_record_count=len(pending_events),
+            reflected_at=now,
+        ),
+    )
+    for event in pending_events:
+        event.reflected_at = now
+    db.commit()
+    merge_core_memory_insight(db=db, user_id=user_id, insight=clean_insight)
     return 1, True
 
 
@@ -800,14 +947,48 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
     daily_events_created = 0
     high_level_insights_created = 0
     core_memory_updated = False
+    scored_memories: list[dict[str, Any]] = []
+    daily_events: list[str] = []
+    high_level_insight = ""
+
+    try:
+        if records:
+            scored_memories = _score_episodic_memories(source_agent, records)
+            daily_events = _daily_event_summaries(source_agent, records)
+            high_level_insight = _plan_high_level_insight(
+                db=db,
+                source_agent=source_agent,
+                planned_daily_events=daily_events,
+            )
+
+        graph_triples = _extract_graph_triples(source_agent, candidate_agents, records)
+        relationship_changes = _relationship_changes_from_triples(graph_triples)
+        if not relationship_changes:
+            relationship_changes = _analyze_relationship_changes(
+                source_agent=source_agent,
+                candidate_agents=candidate_agents,
+                records=records,
+            )
+    except ConsolidationLLMError as exc:
+        db.rollback()
+        logger.warning(
+            "[Sleep Consolidation] Aborted; preserving working memory for retry. "
+            "reason=%s",
+            exc,
+        )
+        return _aborted_consolidation_result(
+            user_id=user_id,
+            agent_id=source_agent.id,
+            records_count=len(records),
+            reason=str(exc),
+        )
 
     if records:
         chunks_added = add_scored_memories(
             user_id=user_id,
             agent_id=source_agent.id,
-            memories=_score_episodic_memories(source_agent, records),
+            memories=scored_memories,
         )
-        daily_events = _daily_event_summaries(source_agent, records)
         daily_events_created = _create_daily_events(
             db=db,
             source_agent=source_agent,
@@ -815,21 +996,14 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
             source_record_count=len(records),
         )
         high_level_insights_created, core_memory_updated = (
-            _maybe_create_high_level_insight(
+            _persist_high_level_insight(
                 db=db,
                 source_agent=source_agent,
                 user_id=user_id,
+                insight=high_level_insight,
             )
         )
 
-    graph_triples = _extract_graph_triples(source_agent, candidate_agents, records)
-    relationship_changes = _relationship_changes_from_triples(graph_triples)
-    if not relationship_changes:
-        relationship_changes = _analyze_relationship_changes(
-            source_agent=source_agent,
-            candidate_agents=candidate_agents,
-            records=records,
-        )
     relationship_updates = _apply_relationship_changes(
         db=db,
         source_agent_id=source_agent.id,

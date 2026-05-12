@@ -233,7 +233,7 @@ export default function MemoryPage() {
         { method: "POST" },
       );
       setSleepResult(result);
-      setToast(copy.sleepDone);
+      setToast(result.graph_memory_cleared ? copy.sleepDone : result.message);
       await refreshDiagnostics(session, currentBranch);
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.sleepFailed);

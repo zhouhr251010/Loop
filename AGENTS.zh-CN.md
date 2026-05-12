@@ -21,6 +21,7 @@ Loop 是一个面向计算社会科学实验的研究原型。它把真实参与
 
 ```text
 Loop/
+  Makefile                  工程化启动和校验脚本
   backend/
     app/
       main.py                 FastAPI 入口、中间件、路由挂载、启动时建表
@@ -97,9 +98,7 @@ Loop/
 ## 后端运行
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend
-conda activate Loop
-uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+make backend
 ```
 
 接口文档：
@@ -131,11 +130,58 @@ http://localhost:8001/docs
 - `security.py` 负责 bearer token、管理员 API key、请求大小限制、内存限流、安全响应头和 trusted host。
 - 普通用户接口一般要求 `Authorization: Bearer <token>`。
 - 研究控制接口一般要求 `X-Loop-Admin-Key`，对应 `.env` 的 `LOOP_ADMIN_API_KEY`。
+- **架构黑科技 1：Agentic Memory / 主动寻址记忆已经是核心链路，不是普通 RAG 装饰。** Chat 生成路径允许 Agent 主动调用 `search_personal_memory`、`edit_core_memory`、`read_plaza_feed`、`get_current_time`、`check_energy_budget`、`update_internal_state` 等工具。用户说出长期身份事实、关系变化、稳定偏好或价值观时，Agent 必须用 `edit_core_memory` 写入 durable Core Memory；遇到需要回忆的问题时，用 `search_personal_memory` 定向进入 `retrieve_hybrid_memory()`，而不是把所有历史粗暴塞进 prompt。
+- `llm_service.py` 同时保留 tool-calling chat 和 fallback retrieval 路径，并通过 `historical_chat_loader` 按需翻页读取更早的分支聊天历史。不要把它退化成一次性加载全部聊天记录。
+- `agent_graph.py` 把 `AGENT_TOOLS` 绑定进 LangGraph 流程，维护 active messages、emotion、energy、topic state 和 core-memory writeback。这是 Agent 运行时心智回路，后续改动必须保护。
 - `EventLog` 是分支和时间机器的核心：帖子、聊天、反事实事件都会写入事件流。
 - `TimeMachine` 根据指定 `agent_id`、`branch_id`、时间点重放事件，重建当前 core memory、工作记忆、关系等状态。
 - FastAPI lifespan 会调用 `warm_up_rag_models()`；默认 `LOOP_RAG_PRELOAD=true` 时会预加载 Chroma/BGE/reranker，首次启动可能较慢。
 - RAG 记忆写入 `chroma_db/`，用 user/agent/branch 元数据隔离检索范围。
+- **架构黑科技 2：前端分页防爆机制已经上线。** Plaza、Chat、TimeMachine 三类可能无限增长的长列表都必须走 `skip`/`limit` 分页、`hasMore*` 状态和显式“加载更多”。保留 `PLAZA_PAGE_SIZE`、`CHAT_HISTORY_PAGE_SIZE`、`EVENT_PAGE_SIZE` 这类硬上限，不要回退成一次性拉取全部帖子、全部聊天或全部事件。
+- 后端列表接口也必须继续保留有界 `limit`：`/api/plaza/events`、`/api/posts`、`/api/agents/{agent_id}/chat`、`/api/agents/{agent_id}/events` 是长实验防爆边界。
 - `/api/admin/purge-branch` 是破坏性维护接口，只允许清理非 `main` 分支。它会删除该分支相关事件、帖子、聊天和纠错记录，并临时移除再恢复 `event_logs_no_delete` trigger。
+
+## 核心数据流转 (Data Flow)
+
+参与者建模链路：
+
+```text
+参与者注册/登录
+  -> 前端 localStorage 保存 bearer session
+  -> 提交问卷 + 数字自传
+  -> 写入 User.core_memory 并创建/更新 Agent
+  -> 后续所有广场、私聊、记忆、时间机器操作都围绕 agent_id + branch_id 展开
+```
+
+运行时事件链路：
+
+```text
+用户或 Agent 发起动作
+  -> FastAPI router 校验 bearer/admin key、权限和 branch_id
+  -> SQLAlchemy 写入 Post/ChatLog/FeedbackLog/Relationship 等业务表
+  -> event_store 追加 EventLog，不 update/delete 时间线
+  -> 分支读模型按 branch lineage 过滤或由 TimeMachine 重放
+  -> 前端分页视图渲染当前 branch 的广场、聊天、记忆诊断或事件历史
+```
+
+记忆学习链路：
+
+```text
+数字自传 / 记忆上传 / 群聊导入 / 私聊 / 帖子纠错
+  -> ChromaDB episodic chunks + User.core_memory + ChatLog/FeedbackLog
+  -> Agentic Memory 工具主动检索或更新目标记忆
+  -> DeepSeek/tool-calling chat 或自动发帖使用分支状态 + 主动检索记忆
+  -> sleep consolidation 和 feedback reflection 继续沉淀高层反思与关系分数
+```
+
+分支实验与导出链路：
+
+```text
+TimeMachine 在某个 EventLog 时间点重建 Agent 状态
+  -> fork 写入 counterfactual event 到新 branch
+  -> Plaza/Chat/Memory Lab/TimeMachine 通过 BranchSelector 切换分支
+  -> Lab 导出 ChatLog/FeedbackLog JSONL 进入研究分析
+```
 
 ## 主要后端接口
 
@@ -276,8 +322,7 @@ LOOP_TOPIC_ROUTER_LLM_ENABLED=true
 ## 前端运行
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/frontend
-npm run dev -- --hostname 127.0.0.1 --port 3000
+make frontend
 ```
 
 `frontend/.env.local` 建议：
@@ -323,7 +368,8 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 主要功能：
 
 - 通过 `BranchSelector` 在 `main` 和 fork 出来的分支之间切换。
-- 调用 `/api/plaza/events?branch_id=...` 加载分支继承后的帖子列表。
+- 调用 `/api/plaza/events?branch_id=...&skip=...&limit=...` 分页加载分支继承后的帖子列表。
+- 首屏只加载 `PLAZA_PAGE_SIZE` 条，点击“加载更多”后按 `posts.length` 作为 skip 继续取下一页，并对已有 post id 去重，避免长实验 feed 一次性爆内存。
 - 当前用户可以通过 `/api/agents/me/posts` 手动发帖到当前分支。
 - 如果帖子来自当前用户自己的 Agent，会显示纠错按钮。
 - 纠错会调用 `/api/posts/{post_id}/feedback`，后端保存 `FeedbackLog` 并尝试触发反馈反思合并。
@@ -339,7 +385,8 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 主要功能：
 
 - 分支选择：`/api/simulation/agents/{agent_id}/branches`
-- 历史加载：`GET /api/agents/{agent_id}/chat?branch_id=...`
+- 历史加载：`GET /api/agents/{agent_id}/chat?branch_id=...&skip=...&limit=...`
+- 历史分页：首屏加载 `CHAT_HISTORY_PAGE_SIZE` 个 turn，更早消息点击按钮再取；插入旧消息时保留滚动锚点，避免聊天窗口跳动。
 - 发送消息：`POST /api/agents/{agent_id}/chat`
 - 模型选择：`fast` 或 `deep`
 
@@ -391,7 +438,8 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 
 - 加载 Agent 列表：`/api/users/agent-choices`，通常需要管理员 key。
 - 加载分支列表：`/api/simulation/agents/{agent_id}/branches`
-- 加载事件历史：`/api/agents/{agent_id}/events?branch_id=...`
+- 加载事件历史：`/api/agents/{agent_id}/events?branch_id=...&skip=...&limit=...`
+- 事件分页：每页 `EVENT_PAGE_SIZE` 条，使用“加载更早事件”继续取历史，避免时间线过长时卡死浏览器。
 - 创建新分支：`POST /api/simulation/fork`
 
 fork 时需要提供：
@@ -453,8 +501,8 @@ BASIC_AUTH_SESSION_SECONDS=43200
 
 ## 典型完整测试流程
 
-1. 启动 FastAPI：`127.0.0.1:8001`。
-2. 启动 Next.js：`127.0.0.1:3000`。
+1. 启动 FastAPI：`make backend`，监听 `127.0.0.1:8001`。
+2. 启动 Next.js：`make frontend`，监听 `127.0.0.1:3000`。
 3. 本地电脑通过 SSH tunnel 打开 `http://localhost:3000`。
 4. 如果启用了站点访问验证，先通过 `/site-login`。
 5. 注册或登录参与者账号。
@@ -474,30 +522,25 @@ BASIC_AUTH_SESSION_SECONDS=43200
 前端类型检查：
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/frontend
-node node_modules/typescript/bin/tsc --noEmit
+make frontend-check
 ```
 
 后端 Python 编译检查：
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend
-conda activate Loop
-python -m compileall app
+make backend-check
 ```
 
 后端健康检查：
 
 ```bash
-curl -i http://127.0.0.1:8001/health
+make health
 ```
 
 Next.js 代理检查：
 
 ```bash
-curl -i -X POST http://127.0.0.1:3000/api/users/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"proxy_probe","password":"password123"}'
+make proxy-check
 ```
 
 ## 常见问题排查

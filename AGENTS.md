@@ -75,6 +75,7 @@ For a more detailed Chinese handoff document, see `AGENTS.zh-CN.md`.
     .env.local.example
   .env
   .gitignore
+  Makefile
   AGENTS.md
   AGENTS.zh-CN.md
 ```
@@ -110,9 +111,7 @@ Tech stack:
 Run backend:
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend
-conda activate Loop
-uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+make backend
 ```
 
 Backend docs:
@@ -141,6 +140,54 @@ Core SQLAlchemy tables:
 - `EventLog`: append-only event store for reconstructing branch timelines
 - `Relationship`: directed social-affinity scores between Agents
 - `ReflectionEvent`: layered reflection nodes from sleep-style memory consolidation
+
+## Core Mechanisms That Must Be Preserved
+
+- **Agentic Memory / active memory addressing is now core architecture, not optional RAG.** Chat generation can let the Agent actively call tools such as `search_personal_memory`, `edit_core_memory`, `read_plaza_feed`, `get_current_time`, `check_energy_budget`, and `update_internal_state`. The Agent must use `edit_core_memory` when the user reveals durable identity facts, while `search_personal_memory` routes targeted questions into `retrieve_hybrid_memory()` instead of blindly stuffing every memory chunk into the prompt.
+- `backend/app/services/llm_service.py` keeps both tool-calling chat and fallback retrieval paths. Its historical chat loader can page older branch-scoped chat turns on demand, so do not replace it with one unbounded "load all history" query.
+- `backend/app/services/agent_graph.py` binds `AGENT_TOOLS` into the graph and preserves short-term active messages, emotion, energy, topic state, and core-memory writeback. Treat this as the Agent runtime loop.
+- **Frontend pagination anti-blowup is also core architecture.** Plaza, Chat, and TimeMachine load bounded pages with `skip`/`limit`, `hasMore*` flags, and explicit "load more" flows. Keep `PLAZA_PAGE_SIZE`, `CHAT_HISTORY_PAGE_SIZE`, and `EVENT_PAGE_SIZE` style guards; do not regress these pages to fetching all posts, all chat logs, or all events at once.
+- Backend list endpoints must continue to enforce bounded `limit` values: `/api/plaza/events`, `/api/posts`, `/api/agents/{agent_id}/chat`, and `/api/agents/{agent_id}/events` are intentionally paginated to protect long-running experiments.
+
+## Core Data Flow
+
+```text
+Participant register/login
+  -> bearer session in frontend localStorage
+  -> questionnaire + autobiography
+  -> User.core_memory + Agent creation
+  -> branch-aware activity
+```
+
+Primary runtime chain:
+
+```text
+User/Agent action
+  -> FastAPI router validates bearer/admin key and branch_id
+  -> SQLAlchemy writes domain row when needed
+  -> EventLog append-only event is recorded
+  -> branch-aware readers replay or filter EventLog
+  -> frontend paginated views render the selected branch
+```
+
+Memory and learning chain:
+
+```text
+Autobiography / uploads / imported chat / private chat / feedback
+  -> ChromaDB episodic chunks + User.core_memory + ChatLog/FeedbackLog
+  -> Agentic Memory tools actively retrieve or update the right memory
+  -> DeepSeek/tool-calling chat or post generation uses branch state + retrieved memory
+  -> sleep consolidation and feedback reflection update higher-level memory/relationships
+```
+
+Branching and export chain:
+
+```text
+TimeMachine reconstructs state at an EventLog timestamp
+  -> fork writes a counterfactual event into a new branch
+  -> Plaza, Chat, Memory Lab, and TimeMachine select that branch
+  -> Lab exports ChatLog/FeedbackLog JSONL for research
+```
 
 Implemented backend API:
 
@@ -296,8 +343,7 @@ Tech stack:
 Run frontend:
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/frontend
-npm run dev -- --hostname 127.0.0.1 --port 3000
+make frontend
 ```
 
 Frontend URL through SSH tunnel:
@@ -362,10 +408,11 @@ Frontend MVP behavior:
 - Questionnaire submission sends MBTI, Big Five, Schwartz values, and `autobiography`, then stores `agent_id` and `agent_name`.
 - `frontend/src/lib/api.ts` attaches `Authorization: Bearer <token>` to API calls.
 - Plaza loads branch-aware posts from `GET /api/plaza/events?branch_id=...`.
+- Plaza fetches posts one page at a time from `GET /api/plaza/events?branch_id=...&skip=...&limit=...`, appends unique posts, and only shows "Load more" while the last page is full.
 - Plaza can publish authenticated Agent posts through `POST /api/agents/me/posts`.
 - Posts from the current user's Agent show a correction button.
 - Corrections are sent to `POST /api/posts/{post_id}/feedback`.
-- Chat page calls `GET /api/agents/{agent_id}/chat` for history and `POST /api/agents/{agent_id}/chat` for new turns.
+- Chat page calls paginated `GET /api/agents/{agent_id}/chat?branch_id=...&skip=...&limit=...` for history and `POST /api/agents/{agent_id}/chat` for new turns.
 - Memory and chat pages use `BranchSelector` so a user can inspect or operate on `main` and forked branches.
 - `AppProviders` wraps the UI in `LanguageProvider`; page copy is loaded from `frontend/src/locales/dictionary.ts` and persisted as `loop_ui_language`.
 - Site access middleware requires `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`; successful login sets an HTTP-only `loop_site_auth` cookie.
@@ -382,8 +429,8 @@ Frontend UI notes:
 
 ## End-to-End Test Flow
 
-1. Start backend.
-2. Start frontend.
+1. Start backend with `make backend`.
+2. Start frontend with `make frontend`.
 3. From your personal computer, open `http://localhost:3000` through the SSH tunnel.
 4. Pass `/site-login` if site-level auth env vars are configured.
 5. Register or log in as a participant.
@@ -406,7 +453,7 @@ If frontend registration fails on the remote server, check these in order:
 1. Backend health:
 
 ```bash
-curl -i http://127.0.0.1:8001/health
+make health
 ```
 
 Expected response: `200 OK` with `{"status":"ok","service":"loop-research-api"}`.
@@ -449,9 +496,7 @@ Expected response: `200 OK` with `access-control-allow-origin` matching the fron
 5. Next.js same-origin proxy:
 
 ```bash
-curl -i -X POST http://127.0.0.1:3000/api/users/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"proxy_probe","password":"password123"}'
+make proxy-check
 ```
 
 Expected response: `201 Created`. This verifies the frontend server can proxy `/api` requests to FastAPI.
@@ -464,16 +509,13 @@ Do not expose `3000` or `8001` publicly. Keep both services bound to
 Frontend validation command:
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/frontend
-node node_modules/typescript/bin/tsc --noEmit
+make frontend-check
 ```
 
 Backend import check:
 
 ```bash
-cd /mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend
-conda activate Loop
-python -m compileall app
+make backend-check
 ```
 
 ## Git Notes
