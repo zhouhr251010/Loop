@@ -1,0 +1,1130 @@
+[
+  {
+    "set": "IPIP120",
+    "id": "IPIP_001",
+    "text": "Worry about things.",
+    "type": "likert5",
+    "text_en": "Worry about things.",
+    "text_zh": "我会为事情担忧。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_002",
+    "text": "Make friends easily.",
+    "type": "likert5",
+    "text_en": "Make friends easily.",
+    "text_zh": "我很容易交朋友。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_003",
+    "text": "Have a vivid imagination.",
+    "type": "likert5",
+    "text_en": "Have a vivid imagination.",
+    "text_zh": "我有生动的想象力。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_004",
+    "text": "Trust others.",
+    "type": "likert5",
+    "text_en": "Trust others.",
+    "text_zh": "我信任他人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_005",
+    "text": "Complete tasks successfully.",
+    "type": "likert5",
+    "text_en": "Complete tasks successfully.",
+    "text_zh": "我能成功完成任务。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_006",
+    "text": "Get angry easily.",
+    "type": "likert5",
+    "text_en": "Get angry easily.",
+    "text_zh": "我容易生气。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_007",
+    "text": "Love large parties.",
+    "type": "likert5",
+    "text_en": "Love large parties.",
+    "text_zh": "我喜欢大型聚会。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_008",
+    "text": "Believe in the importance of art.",
+    "type": "likert5",
+    "text_en": "Believe in the importance of art.",
+    "text_zh": "我相信艺术的重要性。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_009",
+    "text": "Use others for my own ends.",
+    "type": "likert5",
+    "text_en": "Use others for my own ends.",
+    "text_zh": "我会利用他人来达到自己的目的。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_010",
+    "text": "Like to tidy up.",
+    "type": "likert5",
+    "text_en": "Like to tidy up.",
+    "text_zh": "我喜欢把东西整理整齐。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_011",
+    "text": "Often feel blue.",
+    "type": "likert5",
+    "text_en": "Often feel blue.",
+    "text_zh": "我经常感到忧郁。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_012",
+    "text": "Take charge.",
+    "type": "likert5",
+    "text_en": "Take charge.",
+    "text_zh": "我会主动负责。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_013",
+    "text": "Experience my emotions intensely.",
+    "type": "likert5",
+    "text_en": "Experience my emotions intensely.",
+    "text_zh": "我强烈地体验自己的情绪。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_014",
+    "text": "Love to help others.",
+    "type": "likert5",
+    "text_en": "Love to help others.",
+    "text_zh": "我喜欢帮助他人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_015",
+    "text": "Keep my promises.",
+    "type": "likert5",
+    "text_en": "Keep my promises.",
+    "text_zh": "我会遵守承诺。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_016",
+    "text": "Find it difficult to approach others.",
+    "type": "likert5",
+    "text_en": "Find it difficult to approach others.",
+    "text_zh": "我觉得很难主动接近别人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_017",
+    "text": "Am always busy.",
+    "type": "likert5",
+    "text_en": "Am always busy.",
+    "text_zh": "我总是很忙。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_018",
+    "text": "Prefer variety to routine.",
+    "type": "likert5",
+    "text_en": "Prefer variety to routine.",
+    "text_zh": "比起例行公事，我更喜欢变化。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_019",
+    "text": "Love a good fight.",
+    "type": "likert5",
+    "text_en": "Love a good fight.",
+    "text_zh": "我喜欢激烈冲突。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_020",
+    "text": "Work hard.",
+    "type": "likert5",
+    "text_en": "Work hard.",
+    "text_zh": "我工作努力。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_021",
+    "text": "Go on binges.",
+    "type": "likert5",
+    "text_en": "Go on binges.",
+    "text_zh": "我会放纵自己。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_022",
+    "text": "Love excitement.",
+    "type": "likert5",
+    "text_en": "Love excitement.",
+    "text_zh": "我喜欢刺激。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_023",
+    "text": "Love to read challenging material.",
+    "type": "likert5",
+    "text_en": "Love to read challenging material.",
+    "text_zh": "我喜欢阅读有挑战性的材料。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_024",
+    "text": "Believe that I am better than others.",
+    "type": "likert5",
+    "text_en": "Believe that I am better than others.",
+    "text_zh": "我相信自己比别人更好。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_025",
+    "text": "Am always prepared.",
+    "type": "likert5",
+    "text_en": "Am always prepared.",
+    "text_zh": "我总是准备充分。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_026",
+    "text": "Panic easily.",
+    "type": "likert5",
+    "text_en": "Panic easily.",
+    "text_zh": "我容易惊慌。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_027",
+    "text": "Radiate joy.",
+    "type": "likert5",
+    "text_en": "Radiate joy.",
+    "text_zh": "我散发快乐。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_028",
+    "text": "Tend to vote for liberal (progressive) political candidates.",
+    "type": "likert5",
+    "text_en": "Tend to vote for liberal (progressive) political candidates.",
+    "text_zh": "我倾向于投票给自由派（进步派）政治候选人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_029",
+    "text": "Sympathise with the homeless.",
+    "type": "likert5",
+    "text_en": "Sympathise with the homeless.",
+    "text_zh": "我同情无家可归的人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_030",
+    "text": "Jump into things without thinking.",
+    "type": "likert5",
+    "text_en": "Jump into things without thinking.",
+    "text_zh": "我会不假思索地投入事情。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_031",
+    "text": "Fear for the worst.",
+    "type": "likert5",
+    "text_en": "Fear for the worst.",
+    "text_zh": "我担心最坏的情况。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_032",
+    "text": "Feel comfortable around people.",
+    "type": "likert5",
+    "text_en": "Feel comfortable around people.",
+    "text_zh": "我在人群中感到自在。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_033",
+    "text": "Enjoy wild flights of fantasy.",
+    "type": "likert5",
+    "text_en": "Enjoy wild flights of fantasy.",
+    "text_zh": "我享受狂野的幻想。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_034",
+    "text": "Believe that others have good intentions.",
+    "type": "likert5",
+    "text_en": "Believe that others have good intentions.",
+    "text_zh": "我相信别人怀有善意。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_035",
+    "text": "Excel in what I do.",
+    "type": "likert5",
+    "text_en": "Excel in what I do.",
+    "text_zh": "我在自己做的事情上表现出色。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_036",
+    "text": "Get irritated easily.",
+    "type": "likert5",
+    "text_en": "Get irritated easily.",
+    "text_zh": "我容易被激怒。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_037",
+    "text": "Talk to a lot of different people at parties.",
+    "type": "likert5",
+    "text_en": "Talk to a lot of different people at parties.",
+    "text_zh": "我会在聚会上和很多不同的人交谈。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_038",
+    "text": "See beauty in things that others might not notice.",
+    "type": "likert5",
+    "text_en": "See beauty in things that others might not notice.",
+    "text_zh": "我能看到别人可能注意不到的美。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_039",
+    "text": "Cheat to get ahead.",
+    "type": "likert5",
+    "text_en": "Cheat to get ahead.",
+    "text_zh": "我会为了占先而作弊。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_040",
+    "text": "Often forget to put things back in their proper place.",
+    "type": "likert5",
+    "text_en": "Often forget to put things back in their proper place.",
+    "text_zh": "我经常忘记把东西放回原位。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_041",
+    "text": "Dislike myself.",
+    "type": "likert5",
+    "text_en": "Dislike myself.",
+    "text_zh": "我不喜欢自己。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_042",
+    "text": "Try to lead others.",
+    "type": "likert5",
+    "text_en": "Try to lead others.",
+    "text_zh": "我会尝试领导他人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_043",
+    "text": "Feel others' emotions.",
+    "type": "likert5",
+    "text_en": "Feel others' emotions.",
+    "text_zh": "我能感受到他人的情绪。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_044",
+    "text": "Am concerned about others.",
+    "type": "likert5",
+    "text_en": "Am concerned about others.",
+    "text_zh": "我关心他人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_045",
+    "text": "Tell the truth.",
+    "type": "likert5",
+    "text_en": "Tell the truth.",
+    "text_zh": "我说实话。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_046",
+    "text": "Am afraid to draw attention to myself.",
+    "type": "likert5",
+    "text_en": "Am afraid to draw attention to myself.",
+    "text_zh": "我害怕引起别人注意。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_047",
+    "text": "Am always on the go.",
+    "type": "likert5",
+    "text_en": "Am always on the go.",
+    "text_zh": "我总是在行动。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_048",
+    "text": "Prefer to stick with things that I know.",
+    "type": "likert5",
+    "text_en": "Prefer to stick with things that I know.",
+    "text_zh": "我更喜欢坚持自己熟悉的事物。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_049",
+    "text": "Yell at people.",
+    "type": "likert5",
+    "text_en": "Yell at people.",
+    "text_zh": "我会对人大喊大叫。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_050",
+    "text": "Do more than what's expected of me.",
+    "type": "likert5",
+    "text_en": "Do more than what's expected of me.",
+    "text_zh": "我会做得比别人期待的更多。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_051",
+    "text": "Rarely overindulge.",
+    "type": "likert5",
+    "text_en": "Rarely overindulge.",
+    "text_zh": "我很少过度放纵。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_052",
+    "text": "Seek adventure.",
+    "type": "likert5",
+    "text_en": "Seek adventure.",
+    "text_zh": "我寻求冒险。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_053",
+    "text": "Avoid philosophical discussions.",
+    "type": "likert5",
+    "text_en": "Avoid philosophical discussions.",
+    "text_zh": "我避免哲学讨论。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_054",
+    "text": "Think highly of myself.",
+    "type": "likert5",
+    "text_en": "Think highly of myself.",
+    "text_zh": "我高度评价自己。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_055",
+    "text": "Carry out my plans.",
+    "type": "likert5",
+    "text_en": "Carry out my plans.",
+    "text_zh": "我会执行自己的计划。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_056",
+    "text": "Become overwhelmed by events.",
+    "type": "likert5",
+    "text_en": "Become overwhelmed by events.",
+    "text_zh": "我会被事情压垮。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_057",
+    "text": "Have a lot of fun.",
+    "type": "likert5",
+    "text_en": "Have a lot of fun.",
+    "text_zh": "我有很多乐趣。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_058",
+    "text": "Believe that there is no absolute right or wrong.",
+    "type": "likert5",
+    "text_en": "Believe that there is no absolute right or wrong.",
+    "text_zh": "我相信没有绝对的是非。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_059",
+    "text": "Feel sympathy for those who are worse off than myself.",
+    "type": "likert5",
+    "text_en": "Feel sympathy for those who are worse off than myself.",
+    "text_zh": "我同情那些境遇比我更差的人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_060",
+    "text": "Make rash decisions.",
+    "type": "likert5",
+    "text_en": "Make rash decisions.",
+    "text_zh": "我会草率做决定。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_061",
+    "text": "Am afraid of many things.",
+    "type": "likert5",
+    "text_en": "Am afraid of many things.",
+    "text_zh": "我害怕许多事情。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_062",
+    "text": "Avoid contact with others.",
+    "type": "likert5",
+    "text_en": "Avoid contact with others.",
+    "text_zh": "我避免与他人接触。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_063",
+    "text": "Love to daydream.",
+    "type": "likert5",
+    "text_en": "Love to daydream.",
+    "text_zh": "我喜欢做白日梦。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_064",
+    "text": "Trust what people say.",
+    "type": "likert5",
+    "text_en": "Trust what people say.",
+    "text_zh": "我相信别人说的话。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_065",
+    "text": "Handle tasks smoothly.",
+    "type": "likert5",
+    "text_en": "Handle tasks smoothly.",
+    "text_zh": "我能顺利处理任务。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_066",
+    "text": "Lose my temper.",
+    "type": "likert5",
+    "text_en": "Lose my temper.",
+    "text_zh": "我会发脾气。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_067",
+    "text": "Prefer to be alone.",
+    "type": "likert5",
+    "text_en": "Prefer to be alone.",
+    "text_zh": "我更喜欢独处。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_068",
+    "text": "Do not like poetry.",
+    "type": "likert5",
+    "text_en": "Do not like poetry.",
+    "text_zh": "我不喜欢诗歌。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_069",
+    "text": "Take advantage of others.",
+    "type": "likert5",
+    "text_en": "Take advantage of others.",
+    "text_zh": "我会占他人便宜。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_070",
+    "text": "Leave a mess in my room.",
+    "type": "likert5",
+    "text_en": "Leave a mess in my room.",
+    "text_zh": "我会把房间弄得一团糟。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_071",
+    "text": "Am often down in the dumps.",
+    "type": "likert5",
+    "text_en": "Am often down in the dumps.",
+    "text_zh": "我经常情绪低落。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_072",
+    "text": "Take control of things.",
+    "type": "likert5",
+    "text_en": "Take control of things.",
+    "text_zh": "我会掌控局面。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_073",
+    "text": "Rarely notice my emotional reactions.",
+    "type": "likert5",
+    "text_en": "Rarely notice my emotional reactions.",
+    "text_zh": "我很少注意到自己的情绪反应。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_074",
+    "text": "Am indifferent to the feelings of others.",
+    "type": "likert5",
+    "text_en": "Am indifferent to the feelings of others.",
+    "text_zh": "我对他人的感受漠不关心。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_075",
+    "text": "Break rules.",
+    "type": "likert5",
+    "text_en": "Break rules.",
+    "text_zh": "我会破坏规则。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_076",
+    "text": "Only feel comfortable with friends.",
+    "type": "likert5",
+    "text_en": "Only feel comfortable with friends.",
+    "text_zh": "我只有和朋友在一起时才感到自在。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_077",
+    "text": "Do a lot in my spare time.",
+    "type": "likert5",
+    "text_en": "Do a lot in my spare time.",
+    "text_zh": "我在空闲时间会做很多事情。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_078",
+    "text": "Dislike changes.",
+    "type": "likert5",
+    "text_en": "Dislike changes.",
+    "text_zh": "我不喜欢变化。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_079",
+    "text": "Insult people.",
+    "type": "likert5",
+    "text_en": "Insult people.",
+    "text_zh": "我会侮辱别人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_080",
+    "text": "Do just enough work to get by.",
+    "type": "likert5",
+    "text_en": "Do just enough work to get by.",
+    "text_zh": "我只做刚好够用的工作。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_081",
+    "text": "Easily resist temptations.",
+    "type": "likert5",
+    "text_en": "Easily resist temptations.",
+    "text_zh": "我很容易抵抗诱惑。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_082",
+    "text": "Enjoy being reckless.",
+    "type": "likert5",
+    "text_en": "Enjoy being reckless.",
+    "text_zh": "我喜欢鲁莽行事。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_083",
+    "text": "Have difficulty understanding abstract ideas.",
+    "type": "likert5",
+    "text_en": "Have difficulty understanding abstract ideas.",
+    "text_zh": "我难以理解抽象概念。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_084",
+    "text": "Have a high opinion of myself.",
+    "type": "likert5",
+    "text_en": "Have a high opinion of myself.",
+    "text_zh": "我对自己评价很高。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_085",
+    "text": "Waste my time.",
+    "type": "likert5",
+    "text_en": "Waste my time.",
+    "text_zh": "我会浪费时间。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_086",
+    "text": "Feel that I'm unable to deal with things.",
+    "type": "likert5",
+    "text_en": "Feel that I'm unable to deal with things.",
+    "text_zh": "我觉得自己无法应对事情。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_087",
+    "text": "Love life.",
+    "type": "likert5",
+    "text_en": "Love life.",
+    "text_zh": "我热爱生活。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_088",
+    "text": "Tend to vote for conservative political candidates.",
+    "type": "likert5",
+    "text_en": "Tend to vote for conservative political candidates.",
+    "text_zh": "我倾向于投票给保守派政治候选人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_089",
+    "text": "Am not interested in other people's problems.",
+    "type": "likert5",
+    "text_en": "Am not interested in other people's problems.",
+    "text_zh": "我对别人的问题不感兴趣。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_090",
+    "text": "Rush into things.",
+    "type": "likert5",
+    "text_en": "Rush into things.",
+    "text_zh": "我会仓促行事。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_091",
+    "text": "Get stressed out easily.",
+    "type": "likert5",
+    "text_en": "Get stressed out easily.",
+    "text_zh": "我容易感到压力。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_092",
+    "text": "Keep others at a distance.",
+    "type": "likert5",
+    "text_en": "Keep others at a distance.",
+    "text_zh": "我和别人保持距离。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_093",
+    "text": "Like to get lost in thought.",
+    "type": "likert5",
+    "text_en": "Like to get lost in thought.",
+    "text_zh": "我喜欢沉浸在思考中。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_094",
+    "text": "Distrust people.",
+    "type": "likert5",
+    "text_en": "Distrust people.",
+    "text_zh": "我不信任别人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_095",
+    "text": "Know how to get things done.",
+    "type": "likert5",
+    "text_en": "Know how to get things done.",
+    "text_zh": "我知道怎样把事情做成。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_096",
+    "text": "Am not easily annoyed.",
+    "type": "likert5",
+    "text_en": "Am not easily annoyed.",
+    "text_zh": "我不容易被惹恼。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_097",
+    "text": "Avoid crowds.",
+    "type": "likert5",
+    "text_en": "Avoid crowds.",
+    "text_zh": "我避免人群。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_098",
+    "text": "Do not enjoy going to art museums.",
+    "type": "likert5",
+    "text_en": "Do not enjoy going to art museums.",
+    "text_zh": "我不喜欢去艺术博物馆。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_099",
+    "text": "Obstruct others' plans.",
+    "type": "likert5",
+    "text_en": "Obstruct others' plans.",
+    "text_zh": "我会阻碍别人的计划。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_100",
+    "text": "Leave my belongings around.",
+    "type": "likert5",
+    "text_en": "Leave my belongings around.",
+    "text_zh": "我把自己的物品随处乱放。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_101",
+    "text": "Feel comfortable with myself.",
+    "type": "likert5",
+    "text_en": "Feel comfortable with myself.",
+    "text_zh": "我对自己感到自在。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_102",
+    "text": "Wait for others to lead the way.",
+    "type": "likert5",
+    "text_en": "Wait for others to lead the way.",
+    "text_zh": "我会等待别人带头。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_103",
+    "text": "Don't understand people who get emotional.",
+    "type": "likert5",
+    "text_en": "Don't understand people who get emotional.",
+    "text_zh": "我不理解那些情绪化的人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_104",
+    "text": "Take no time for others.",
+    "type": "likert5",
+    "text_en": "Take no time for others.",
+    "text_zh": "我不会为别人花时间。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_105",
+    "text": "Break my promises.",
+    "type": "likert5",
+    "text_en": "Break my promises.",
+    "text_zh": "我会违背承诺。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_106",
+    "text": "Am not bothered by difficult social situations.",
+    "type": "likert5",
+    "text_en": "Am not bothered by difficult social situations.",
+    "text_zh": "我不会被困难的社交场合困扰。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_107",
+    "text": "Like to take it easy.",
+    "type": "likert5",
+    "text_en": "Like to take it easy.",
+    "text_zh": "我喜欢轻松度日。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_108",
+    "text": "Am attached to conventional ways.",
+    "type": "likert5",
+    "text_en": "Am attached to conventional ways.",
+    "text_zh": "我依恋传统做法。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_109",
+    "text": "Get back at others.",
+    "type": "likert5",
+    "text_en": "Get back at others.",
+    "text_zh": "我会报复别人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_110",
+    "text": "Put little time and effort into my work.",
+    "type": "likert5",
+    "text_en": "Put little time and effort into my work.",
+    "text_zh": "我在工作上投入很少时间和精力。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_111",
+    "text": "Am able to control my cravings.",
+    "type": "likert5",
+    "text_en": "Am able to control my cravings.",
+    "text_zh": "我能够控制自己的渴望。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_112",
+    "text": "Act wild and crazy.",
+    "type": "likert5",
+    "text_en": "Act wild and crazy.",
+    "text_zh": "我会表现得狂野又疯狂。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_113",
+    "text": "Am not interested in theoretical discussions.",
+    "type": "likert5",
+    "text_en": "Am not interested in theoretical discussions.",
+    "text_zh": "我对理论讨论不感兴趣。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_114",
+    "text": "Boast about my virtues.",
+    "type": "likert5",
+    "text_en": "Boast about my virtues.",
+    "text_zh": "我会吹嘘自己的优点。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_115",
+    "text": "Have difficulty starting tasks.",
+    "type": "likert5",
+    "text_en": "Have difficulty starting tasks.",
+    "text_zh": "我很难开始任务。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_116",
+    "text": "Remain calm under pressure.",
+    "type": "likert5",
+    "text_en": "Remain calm under pressure.",
+    "text_zh": "我在压力下保持冷静。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_117",
+    "text": "Look at the bright side of life.",
+    "type": "likert5",
+    "text_en": "Look at the bright side of life.",
+    "text_zh": "我会看生活光明的一面。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_118",
+    "text": "Believe that we should be tough on crime.",
+    "type": "likert5",
+    "text_en": "Believe that we should be tough on crime.",
+    "text_zh": "我认为我们应该严厉打击犯罪。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_119",
+    "text": "Try not to think about the needy.",
+    "type": "likert5",
+    "text_en": "Try not to think about the needy.",
+    "text_zh": "我尽量不去想贫困或需要帮助的人。"
+  },
+  {
+    "set": "IPIP120",
+    "id": "IPIP_120",
+    "text": "Act without thinking.",
+    "type": "likert5",
+    "text_en": "Act without thinking.",
+    "text_zh": "我会不经思考就行动。"
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_001",
+    "text": "产生新想法和具备创造力对他/她很重要。他/她喜欢用自己独特的方式做事。",
+    "type": "likert6",
+    "text_zh": "产生新想法和具备创造力对他/她很重要。他/她喜欢用自己独特的方式做事。",
+    "text_en": "Having new ideas and being creative is important to him/her. He/she likes to do things in his/her own original way."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_002",
+    "text": "富有对他/她很重要。他/她想拥有很多钱和昂贵的东西。",
+    "type": "likert6",
+    "text_zh": "富有对他/她很重要。他/她想拥有很多钱和昂贵的东西。",
+    "text_en": "Being rich is important to him/her. He/she wants to have a lot of money and expensive things."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_003",
+    "text": "他/她认为世界上每个人都受到平等对待很重要。他/她相信每个人在生活中都应该有平等的机会。",
+    "type": "likert6",
+    "text_zh": "他/她认为世界上每个人都受到平等对待很重要。他/她相信每个人在生活中都应该有平等的机会。",
+    "text_en": "He/she thinks it is important that every person in the world be treated equally. He/she believes everyone should have equal opportunities in life."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_004",
+    "text": "展示自己的能力对他/她很重要。他/她希望人们欣赏他/她所做的事情。",
+    "type": "likert6",
+    "text_zh": "展示自己的能力对他/她很重要。他/她希望人们欣赏他/她所做的事情。",
+    "text_en": "Showing his/her abilities is important to him/her. He/she wants people to admire what he/she does."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_005",
+    "text": "生活在安全的环境中对他/她很重要。他/她会避免任何可能危及其安全的事情。",
+    "type": "likert6",
+    "text_zh": "生活在安全的环境中对他/她很重要。他/她会避免任何可能危及其安全的事情。",
+    "text_en": "Living in secure surroundings is important to him/her. He/she avoids anything that might endanger his/her safety."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_006",
+    "text": "他/她喜欢惊喜，总是寻找新的事情做。他/她认为在生活中尝试各种不同的事情很重要。",
+    "type": "likert6",
+    "text_zh": "他/她喜欢惊喜，总是寻找新的事情做。他/她认为在生活中尝试各种不同的事情很重要。",
+    "text_en": "He/she likes surprises and is always looking for new things to do. He/she thinks trying many different things in life is important."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_007",
+    "text": "他/她认为人们应该按照指示做事。他/她认为人们应该始终遵守规则，即使没有人在看。",
+    "type": "likert6",
+    "text_zh": "他/她认为人们应该按照指示做事。他/她认为人们应该始终遵守规则，即使没有人在看。",
+    "text_en": "He/she believes people should do what they are told. He/she thinks people should always follow rules, even when no one is watching."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_008",
+    "text": "倾听与自己不同的人的意见对他/她很重要。即使他/她不同意他们的观点，他/她仍然想了解他们。",
+    "type": "likert6",
+    "text_zh": "倾听与自己不同的人的意见对他/她很重要。即使他/她不同意他们的观点，他/她仍然想了解他们。",
+    "text_en": "Listening to people who are different from him/her is important to him/her. Even when he/she disagrees with them, he/she still wants to understand them."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_009",
+    "text": "谦逊和低调对他/她很重要。他/她尽量不引人注目。",
+    "type": "likert6",
+    "text_zh": "谦逊和低调对他/她很重要。他/她尽量不引人注目。",
+    "text_en": "Being humble and modest is important to him/her. He/she tries not to draw attention to himself/herself."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_010",
+    "text": "享受美好时光对他/她很重要。他/她喜欢“宠爱”自己。",
+    "type": "likert6",
+    "text_zh": "享受美好时光对他/她很重要。他/她喜欢“宠爱”自己。",
+    "text_en": "Having a good time is important to him/her. He/she likes to pamper himself/herself."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_011",
+    "text": "自己决定做什么对他/她很重要。他/她喜欢自由，不依赖别人。",
+    "type": "likert6",
+    "text_zh": "自己决定做什么对他/她很重要。他/她喜欢自由，不依赖别人。",
+    "text_en": "Deciding what to do for himself/herself is important to him/her. He/she likes to be free and not depend on others."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_012",
+    "text": "帮助周围的人对他/她非常重要。他/她想关心他们的福祉。",
+    "type": "likert6",
+    "text_zh": "帮助周围的人对他/她非常重要。他/她想关心他们的福祉。",
+    "text_en": "Helping the people around him/her is very important to him/her. He/she wants to care for their well-being."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_013",
+    "text": "取得巨大成功对他/她很重要。他/她希望人们认可他/她的成就。",
+    "type": "likert6",
+    "text_zh": "取得巨大成功对他/她很重要。他/她希望人们认可他/她的成就。",
+    "text_en": "Being very successful is important to him/her. He/she wants people to recognize his/her achievements."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_014",
+    "text": "政府确保他/她的安全免受一切威胁对他/她很重要。他/她希望国家强大，以便保护其公民。",
+    "type": "likert6",
+    "text_zh": "政府确保他/她的安全免受一切威胁对他/她很重要。他/她希望国家强大，以便保护其公民。",
+    "text_en": "It is important to him/her that the government ensures his/her safety against all threats. He/she wants the country to be strong so it can protect its citizens."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_015",
+    "text": "他/她寻找冒险并喜欢承担风险。他/她想要有一个令人兴奋的生活。",
+    "type": "likert6",
+    "text_zh": "他/她寻找冒险并喜欢承担风险。他/她想要有一个令人兴奋的生活。",
+    "text_en": "He/she looks for adventures and likes taking risks. He/she wants to have an exciting life."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_016",
+    "text": "始终举止得体对他/她很重要。他/她希望避免做任何人们认为是错的事情。",
+    "type": "likert6",
+    "text_zh": "始终举止得体对他/她很重要。他/她希望避免做任何人们认为是错的事情。",
+    "text_en": "Always behaving properly is important to him/her. He/she wants to avoid doing anything people would say is wrong."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_017",
+    "text": "获得他人的尊重对他/她很重要。他/她希望人们按他/她说的去做。",
+    "type": "likert6",
+    "text_zh": "获得他人的尊重对他/她很重要。他/她希望人们按他/她说的去做。",
+    "text_en": "Gaining respect from others is important to him/her. He/she wants people to do what he/she says."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_018",
+    "text": "对朋友忠诚对他/她很重要。他/她想把自己奉献给亲近的人。",
+    "type": "likert6",
+    "text_zh": "对朋友忠诚对他/她很重要。他/她想把自己奉献给亲近的人。",
+    "text_en": "Being loyal to friends is important to him/her. He/she wants to devote himself/herself to people close to him/her."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_019",
+    "text": "他/她坚信人们应该关心自然。保护环境对他/她很重要。",
+    "type": "likert6",
+    "text_zh": "他/她坚信人们应该关心自然。保护环境对他/她很重要。",
+    "text_en": "He/she strongly believes people should care for nature. Protecting the environment is important to him/her."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_020",
+    "text": "传统对他/她很重要。他/她尽量遵循宗教或家庭传承下来的习俗。",
+    "type": "likert6",
+    "text_zh": "传统对他/她很重要。他/她尽量遵循宗教或家庭传承下来的习俗。",
+    "text_en": "Tradition is important to him/her. He/she tries to follow the customs handed down by religion or family."
+  },
+  {
+    "set": "PVQ21",
+    "id": "PVQ_021",
+    "text": "他/她寻找每一个机会去寻欢作乐。做给自己带来快乐的事情对他/她很重要。",
+    "type": "likert6",
+    "text_zh": "他/她寻找每一个机会去寻欢作乐。做给自己带来快乐的事情对他/她很重要。",
+    "text_en": "He/she seeks every chance to have fun. Doing things that bring him/her pleasure is important to him/her."
+  }
+]

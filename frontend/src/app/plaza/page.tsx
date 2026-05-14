@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
@@ -14,6 +15,11 @@ const PLAZA_PAGE_SIZE = 20;
 
 const PLAZA_FEED_ENDPOINT = (branchId: string, skip = 0, limit = PLAZA_PAGE_SIZE) =>
   `/api/plaza/events?branch_id=${encodeURIComponent(branchId)}&skip=${skip}&limit=${limit}`;
+
+type ProbeStatus = {
+  needs_update: boolean;
+  last_submitted: string | null;
+};
 
 function avatarInitial(agentName: string) {
   return agentName.trim().charAt(0).toUpperCase() || "A";
@@ -38,6 +44,7 @@ export default function PlazaPage() {
   const [hasMorePosts, setHasMorePosts] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [probeStatus, setProbeStatus] = useState<ProbeStatus | null>(null);
 
   const currentAgentName = useMemo(
     () => session?.agent_name ?? `${session?.username ?? ""}_Agent`,
@@ -67,9 +74,11 @@ export default function PlazaPage() {
         saveSession(hydratedSession);
         setSession(hydratedSession);
         void loadBranches();
+        void loadProbeStatus();
       } catch {
         setSession(storedSession);
         void loadBranches();
+        void loadProbeStatus();
         setError(copy.noMatchingAgent);
       } finally {
         await refreshFeed(DEFAULT_BRANCH_ID, false);
@@ -78,6 +87,15 @@ export default function PlazaPage() {
 
     bootstrap();
   }, [router]);
+
+  async function loadProbeStatus() {
+    try {
+      const status = await apiRequest<ProbeStatus>("/api/probes/status");
+      setProbeStatus(status);
+    } catch {
+      setProbeStatus(null);
+    }
+  }
 
   async function loadBranches() {
     setIsLoadingBranches(true);
@@ -373,6 +391,15 @@ export default function PlazaPage() {
         {error ? (
           <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 shadow-sm">
             {error}
+          </div>
+        ) : null}
+        {probeStatus?.needs_update ? (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm">
+            <span className="font-medium">{copy.probeReminderTitle}</span>{" "}
+            {copy.probeReminderBody}{" "}
+            <Link className="font-semibold underline" href="/probes">
+              {copy.probeReminderLink}
+            </Link>
           </div>
         ) : null}
 

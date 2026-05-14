@@ -13,6 +13,7 @@ export function NavBar() {
     { href: "/chat", label: t.nav.chat },
     { href: "/import", label: t.nav.import },
     { href: "/memory", label: t.nav.memory },
+    { href: "/counterfactuals", label: t.nav.counterfactuals },
     { href: "/time-machine", label: t.nav.timeMachine },
     { href: "/lab", label: t.nav.lab },
   ];

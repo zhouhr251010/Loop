@@ -1,5 +1,7 @@
 # Loop Project Context for Codex
 
+> **⚠️ v0.x 学术冲刺阶段声明**：当前系统已进入严格的学术实验数据采集阶段。冻结一切非核心功能开发。所有新增代码必须 100% 服务于 IACL 框架的论文验证指标（M1-M6）。
+
 ## Project Summary
 
 Loop is a computational social science research prototype for a large-model
@@ -13,6 +15,21 @@ history, trigger sleep-style consolidation, inspect relationship/memory state,
 fork timelines into counterfactual branches, and export JSONL research data.
 
 For a more detailed Chinese handoff document, see `AGENTS.zh-CN.md`.
+
+## Fast Orientation
+
+If you only remember ten things before touching this codebase, remember these:
+
+- Loop is an event-sourced, branch-aware social simulation. `EventLog` is the timeline truth for branch views, not `Post` or `ChatLog` alone.
+- Each `User` owns exactly one `Agent`; questionnaire submission creates or refreshes that one-to-one mapping.
+- Durable identity currently lives in two places: free-form `autobiography` and structured `core_memory`.
+- `core_memory` is not just three loose fields anymore. The normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`.
+- Chat is no longer "prompt + RAG only". The Agent can actively call tools such as memory search, core-memory editing, plaza reading, and internal-state updates.
+- Branch behavior depends on `TimeMachine` reconstruction plus branch-specific `EventLog` replay. Do not fake branches by simply filtering `Post` rows.
+- User corrections do not rewrite `posts.content` in place. Branch feed projection overlays the newest `FEEDBACK_CREATED` correction when rendering.
+- Long lists are intentionally bounded on both sides. Plaza, chat history, and event history must stay paginated.
+- The frontend normally talks to Next.js on `localhost:3000`, and Next.js rewrites `/api/*` to FastAPI on `127.0.0.1:8001`. `/health` is the current exception.
+- Local runtime state matters: `backend/loop_research.db` and `chroma_db/` are part of the experiment environment and must not be committed or casually deleted.
 
 ## Repository Layout
 
@@ -132,7 +149,7 @@ Core SQLAlchemy tables:
 
 - `User`: username, password hash, MBTI, Big Five, Schwartz values
 - `User.autobiography`: optional digital autobiography / core life memory used as Agent identity memory
-- `User.core_memory`: structured core memory fields used during chat/post generation
+- `User.core_memory`: structured core memory used during chat/post generation; normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`
 - `Agent`: one virtual agent per user
 - `Post`: agent-generated plaza posts
 - `FeedbackLog`: user corrections, including original text, corrected text, timestamp, and future vector-store linkage
@@ -261,6 +278,41 @@ Important backend conventions:
 - `warm_up_rag_models()` runs during FastAPI lifespan unless `LOOP_RAG_PRELOAD=false`; startup can be slow when local BGE models load.
 - `/api/admin/purge-branch` removes runtime records for one non-main branch, temporarily drops and restores the `event_logs_no_delete` SQLite trigger, and should be treated as a destructive research-maintenance operation.
 - `chroma_db/` stores persistent local memory chunks and is ignored by Git.
+
+## Backend Reality Checks
+
+These are current implementation facts that are easy to miss when skimming the repo:
+
+- `core_memory_service.py` normalizes `User.core_memory` to four fields, not three. Older data may be missing `communication_style`, so always normalize before use.
+- `create_or_update_agent_for_user()` updates `Agent.system_prompt_base` in place and emits `AGENT_PROFILE_UPDATED`; agent creation is not a one-time bootstrap only.
+- `post_crud.create_post()` and `feedback_crud.create_feedback_log()` always append matching immutable `EventLog` records. Branch feeds are reconstructed from those events.
+- Plaza correction behavior is projection-based: the latest `FEEDBACK_CREATED` event for a post wins for display in a given branch, while the original `Post` row remains unchanged.
+- `chat_crud.create_chat_log()` also appends a `MESSAGE_RECEIVED` event. Chat history pages read bounded event slices rather than naively loading every `ChatLog`.
+- `TimeMachine` intentionally does not replay raw chat transcripts into the prompt state. It rebuilds compact state such as normalized core memory, counterfactual overrides, intimacy, and a short `current_core_memory` string.
+- `GET /api/agents/{agent_id}/events` is currently only existence-checked and paginated; the router does not enforce bearer ownership or admin auth. Treat it as an internal research endpoint until hardened.
+- `POST /api/simulation/fork` currently forks from `main` only. The new branch stores a fork payload plus one injected counterfactual event; it does not yet fork from arbitrary non-main branches.
+- `POST /api/agents/{agent_id}/import_chat` stores target-agent-perspective memory in Chroma with `branch_id="main"` today.
+- User-facing memory upload/search endpoints also do not expose branch parameters today; most vector-memory tooling is effectively main-world-line scoped, while branch divergence mainly comes from `EventLog` + `TimeMachine`.
+- Relationship-aware feed logic already exists in two places: `post_crud.get_posts_for_viewer()` and `/api/agents/*/feed-preview`. Be careful not to regress these to pure reverse-chronological order everywhere.
+
+## Backend Service Map
+
+Use this section when you need to locate the "real" owner of a behavior quickly:
+
+- `backend/app/main.py`: FastAPI app creation, middleware stack, router mounting, `.env` load, table creation, and optional RAG warmup during lifespan.
+- `backend/app/security.py`: compact signed bearer tokens, admin-key dependency, request-size limit, in-memory rate limit, security headers, and trusted-host enforcement.
+- `backend/app/database.py`: SQLAlchemy engine/session plus lightweight SQLite upgrade logic and append-only triggers for `event_logs`.
+- `backend/app/models.py`: the research data model, all second-precision timestamps, and the append-only event entity.
+- `backend/app/services/event_store.py`: one sanctioned way to append immutable timeline events with JSON-safe payloads and logging.
+- `backend/app/services/branching.py`: branch id normalization, branch existence, global branch listing, and fork anchor reconstruction.
+- `backend/app/services/time_machine.py`: branch-aware event replay into compact agent state. This is the heart of counterfactual reconstruction.
+- `backend/app/services/core_memory_service.py`: normalization, prompt formatting, explicit core-memory edits, and reflection-insight mergeback.
+- `backend/app/services/tools.py`: the tool layer exposed to chat agents. If the Agent should "sense" or "act", it likely belongs here.
+- `backend/app/services/agent_graph.py`: LangGraph runtime loop, working-memory topics, summaries, emotion/energy state, and tool binding.
+- `backend/app/services/llm_service.py`: DeepSeek request settings, post generation, chat generation, tool-calling orchestration, fallback reply path, and historical chat loader contract.
+- `backend/app/services/rag_service.py`: Chroma persistence, BGE embedding/reranking, memory chunking, hybrid retrieval, preload, and strict/fallback behavior.
+- `backend/app/services/consolidation_service.py`: 24-hour record collection, offline sleep-style consolidation, relationship updates, scored episodic memory creation, and working-memory clearing logic.
+- `backend/app/services/feedback_service.py`: post-correction reflection merge path after user feedback.
 
 ## DeepSeek Configuration
 
@@ -426,6 +478,119 @@ Frontend UI notes:
 - Plaza time display uses relative text under 1 hour, such as `x min ago`, and `MM-DD HH:mm` local time afterward.
 - The shared nav is in `frontend/src/components/NavBar.tsx`; it is hidden on `/site-login`.
 - Shared timestamp helpers live in `frontend/src/lib/time.ts`.
+
+## Frontend Page Walkthrough
+
+### `/`
+
+`frontend/src/app/page.tsx` is the participant entry flow.
+
+- Supports register and login.
+- Saves `loop_session` to `localStorage` after auth.
+- Restores a partially completed session after refresh.
+- If the user has no Agent yet, shows the questionnaire/autobiography onboarding step.
+- Also exposes admin-key-based Agent session switching for research/testing.
+
+### `/plaza`
+
+`frontend/src/app/plaza/page.tsx` is the public square feed.
+
+- Uses `BranchSelector` to switch the active world-line.
+- Loads paginated inherited feed items from `GET /api/plaza/events`.
+- Keeps `PLAZA_PAGE_SIZE` and a "load more" workflow to avoid feed blowups.
+- Lets the authenticated user post manually through `POST /api/agents/me/posts`.
+- Shows a correction button only on posts generated by the current user's Agent.
+- Submits corrections to `POST /api/posts/{post_id}/feedback`.
+
+### `/chat`
+
+`frontend/src/app/chat/page.tsx` is the private user-Agent sync UI.
+
+- Loads available branches per agent.
+- Fetches bounded branch history from `GET /api/agents/{agent_id}/chat`.
+- Keeps `CHAT_HISTORY_PAGE_SIZE` and incremental history loading.
+- Sends new turns to `POST /api/agents/{agent_id}/chat`.
+- Persists the chosen model mode: `fast` maps to `DEEPSEEK_CHAT_MODEL`, `deep` maps to `DEEPSEEK_MODEL`.
+
+### `/import`
+
+`frontend/src/app/import/page.tsx` imports group-chat JSON.
+
+- Parses the file client-side.
+- Collects sender ids and lets the researcher map them to known Agent ids.
+- Sends target-agent-perspective import records to `POST /api/agents/me/import_chat`.
+- The backend differentiates "my messages" from "others' messages" in stored memory metadata.
+
+### `/memory`
+
+`frontend/src/app/memory/page.tsx` is the memory lab / diagnostics page.
+
+- Uploads long-form memory chunks.
+- Runs semantic search against local vector memory.
+- Triggers sleep-style consolidation.
+- Inspects and clears short-term LangGraph working memory.
+- Shows reconstructed core memory, topic summaries, emotion/energy, relationships, and personalized feed preview.
+
+### `/time-machine`
+
+`frontend/src/app/time-machine/page.tsx` and `frontend/src/components/TimeMachinePanel.tsx` power the counterfactual timeline UI.
+
+- Loads events in pages from `GET /api/agents/{agent_id}/events`.
+- Keeps `EVENT_PAGE_SIZE` and explicit "load more" behavior.
+- Lets the researcher choose a rollback timestamp and submit a counterfactual event.
+- Calls `POST /api/simulation/fork` to create a new global branch.
+
+### `/lab`
+
+`frontend/src/app/lab/page.tsx` is the research/admin console.
+
+- Checks backend health.
+- Lists agents and branches.
+- Triggers one-off simulated posts or global ticks.
+- Exports chatlogs or feedbacks as JSONL.
+- Can purge a non-main branch through the destructive admin endpoint.
+
+### `/site-login`
+
+`frontend/src/app/site-login/page.tsx`, `frontend/src/app/site-auth/login/route.ts`, and `frontend/src/middleware.ts` implement site-level access control separate from participant auth.
+
+- Middleware redirects document requests to `/site-login` when the `loop_site_auth` cookie is missing or invalid.
+- The login route creates an HMAC-signed session token in an HTTP-only cookie.
+- `BASIC_AUTH_USER`, `BASIC_AUTH_PASSWORD`, `BASIC_AUTH_COOKIE_SECRET`, and `BASIC_AUTH_SESSION_SECONDS` control this outer gate.
+
+## Frontend Shared Runtime State
+
+- `frontend/src/lib/session.ts` stores the participant bearer session in `localStorage` under `loop_session`.
+- `frontend/src/lib/api.ts` automatically injects `Authorization: Bearer <token>` when available.
+- `frontend/src/components/LanguageContext.tsx` stores UI language in `localStorage` as `loop_ui_language`.
+- `frontend/src/lib/siteAuth.ts` signs and verifies the site-access cookie separately from participant auth.
+- `frontend/src/lib/time.ts` treats backend timezone-less timestamps as UTC before local display.
+- `frontend/src/locales/dictionary.ts` is the source of truth for Chinese and English UI text; adding new UI strings usually means updating both locales.
+
+## Event Taxonomy Cheat Sheet
+
+These event types matter most when debugging branch behavior:
+
+- `AGENT_CREATED`: initial Agent row was created for one user.
+- `AGENT_PROFILE_UPDATED`: questionnaire/core-profile refresh updated the existing Agent prompt base.
+- `POST_CREATED`: a plaza post was published and should appear in branch feed projections.
+- `FEEDBACK_CREATED`: a user correction was recorded; feed rendering may now prefer corrected text.
+- `MESSAGE_RECEIVED`: a private chat turn was stored.
+- `CORE_MEMORY_UPDATED`: durable identity memory changed, either by explicit tool use or sleep consolidation.
+- `RELATIONSHIP_CHANGED`: directed affinity between agents changed.
+- `WORKING_MEMORY_CLEARED`: short-term graph memory was manually cleared.
+- `COUNTERFACTUAL_EVENT` or a custom injected event type: a branch fork or synthetic intervention modified a non-main world-line.
+
+## Safe Change Checklist
+
+When modifying core behavior, verify these invariants before you call the work done:
+
+- Branch-aware reads still use `normalize_branch_id()` and respect parent lineage or fork anchors.
+- New write paths append `EventLog` entries if they affect simulation state or branch reconstruction.
+- Chat, plaza, and event history endpoints remain paginated with bounded `limit` values.
+- Sensitive values from `.env` never enter logs, responses, screenshots, or commits.
+- Dev servers still bind to `127.0.0.1`.
+- Any new frontend API path either fits the existing `/api/*` rewrite or is explicitly documented like `/health`.
 
 ## End-to-End Test Flow
 

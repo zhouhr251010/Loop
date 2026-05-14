@@ -1,5 +1,7 @@
 """Database operations for users and questionnaire profiles."""
 
+import logging
+
 import bcrypt
 
 from sqlalchemy import func
@@ -8,6 +10,14 @@ from sqlalchemy.orm import Session
 from app import models
 from app.schemas.user import QuestionnaireCreate, UserCreate
 from app.services.core_memory_service import DEFAULT_CORE_MEMORY
+from app.services.scoring_service import (
+    compact_score_summary,
+    merge_questionnaire_scores_into_core_memory,
+    score_questionnaire_payload,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_user(db: Session, user_id: int) -> models.User | None:
@@ -60,10 +70,29 @@ def update_user_questionnaire(
     questionnaire_in: QuestionnaireCreate,
 ) -> models.User:
     """Persist questionnaire fields on an existing user."""
+    big_five_scores, schwartz_values = score_questionnaire_payload(
+        questionnaire_in.big_five_scores,
+        questionnaire_in.schwartz_values,
+    )
     user.mbti_type = questionnaire_in.mbti_type
-    user.big_five_scores = questionnaire_in.big_five_scores
-    user.schwartz_values = questionnaire_in.schwartz_values
+    user.big_five_scores = big_five_scores
+    user.schwartz_values = schwartz_values
     user.autobiography = questionnaire_in.autobiography
+    user.core_memory = merge_questionnaire_scores_into_core_memory(
+        user.core_memory,
+        questionnaire_in.mbti_type,
+        big_five_scores,
+        schwartz_values,
+    )
     db.commit()
     db.refresh(user)
+    logger.info(
+        "[Questionnaire Scoring] user_id=%s username=%s mbti=%s "
+        "big_five=%s schwartz=%s core_memory_profile_updated=true",
+        user.id,
+        user.username,
+        user.mbti_type,
+        compact_score_summary(user.big_five_scores),
+        compact_score_summary(user.schwartz_values),
+    )
     return user

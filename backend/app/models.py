@@ -1,6 +1,7 @@
 """SQLAlchemy models for Loop's research data core."""
 
 from datetime import datetime
+from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
@@ -21,6 +22,25 @@ from .database import Base
 def utc_now_seconds() -> datetime:
     """Return the current UTC time with second-level precision."""
     return datetime.utcnow().replace(microsecond=0)
+
+
+class ProbeResponse(Base):
+    """Questionnaire and counterfactual probe answer for M1-M6 validation."""
+
+    __tablename__ = "probe_responses"
+
+    response_id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+        index=True,
+    )
+    user_id = Column(String(128), nullable=False, index=True)
+    probe_set = Column(String(64), nullable=False, index=True)
+    probe_id = Column(String(128), nullable=False, index=True)
+    answer = Column(JSON, nullable=False)
+    responder = Column(String(16), nullable=False, index=True)
+    timestamp = Column(DateTime, default=utc_now_seconds, nullable=False, index=True)
 
 
 class User(Base):

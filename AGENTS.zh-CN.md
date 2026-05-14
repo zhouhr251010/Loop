@@ -1,10 +1,27 @@
 # Loop 项目中文接手说明
 
+> **⚠️ v0.x 学术冲刺阶段声明**：当前系统已进入严格的学术实验数据采集阶段。冻结一切非核心功能开发。所有新增代码必须 100% 服务于 IACL 框架的论文验证指标（M1-M6）。
+
 ## 项目定位
 
 Loop 是一个面向计算社会科学实验的研究原型。它把真实参与者的问卷、数字自传、聊天记录、纠错反馈和记忆材料转化为一个虚拟 Agent 的身份与记忆，让多个 Agent 在一个“平行社会”里发帖、聊天、形成关系、产生记忆巩固，并支持研究者导出数据用于后续分析或继续训练。
 
 一句话理解：这是一个“真人画像 -> 虚拟 Agent -> 广场互动 -> 私聊同步 -> 记忆/RAG/时间线 -> 研究数据导出”的实验平台。
+
+## 接手时先记住这些
+
+如果你只来得及记住十件事，优先记这些：
+
+- Loop 是一个事件溯源、分支可回放的社会模拟系统。分支视图的真相来源是 `EventLog`，不是单独的 `Post` 或 `ChatLog` 表。
+- 一个 `User` 只对应一个 `Agent`；问卷提交会创建或刷新这个一对一映射。
+- 用户的长期身份目前主要落在两处：`autobiography` 和结构化 `core_memory`。
+- `core_memory` 现在不是三个字段了，规范键包括 `persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
+- 私聊已经不是“固定 prompt + 普通 RAG”而已，Agent 会主动调用工具查记忆、读广场、改 Core Memory、更新内部状态。
+- 分支效果依赖 `TimeMachine` 的状态重建和分支事件回放，不能只靠给 `Post` 加个 `branch_id` 过滤来理解。
+- 用户纠错不会直接改写 `posts.content`。广场展示时会根据最新的 `FEEDBACK_CREATED` 事件覆盖显示文本。
+- 广场、聊天历史、事件时间线都必须分页，前后端的 `limit`/`skip` 保护是已经上线的核心架构，不是临时优化。
+- 前端正常情况下只和 `localhost:3000` 通信，再由 Next.js rewrite `/api/*` 到 `127.0.0.1:8001`。`/health` 目前是例外。
+- `backend/loop_research.db` 和 `chroma_db/` 都是实验运行态的一部分，不能提交，也不要随手删除。
 
 ## 最高优先级规则
 
@@ -116,6 +133,7 @@ http://localhost:8001/docs
 ## 后端数据模型
 
 - `User`：实验参与者。保存用户名、密码哈希、创建时间、MBTI、Big Five、Schwartz 价值观、数字自传、结构化 core memory。
+- `User.core_memory` 规范字段：`persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
 - `Agent`：每个用户对应一个虚拟 Agent。保存 agent 名字和基础 system prompt。
 - `Post`：Agent 在广场里产生的公开帖子。
 - `FeedbackLog`：用户对自己 Agent 帖子的纠错记录，是持续学习/后续微调的重要监督信号。
@@ -140,6 +158,55 @@ http://localhost:8001/docs
 - **架构黑科技 2：前端分页防爆机制已经上线。** Plaza、Chat、TimeMachine 三类可能无限增长的长列表都必须走 `skip`/`limit` 分页、`hasMore*` 状态和显式“加载更多”。保留 `PLAZA_PAGE_SIZE`、`CHAT_HISTORY_PAGE_SIZE`、`EVENT_PAGE_SIZE` 这类硬上限，不要回退成一次性拉取全部帖子、全部聊天或全部事件。
 - 后端列表接口也必须继续保留有界 `limit`：`/api/plaza/events`、`/api/posts`、`/api/agents/{agent_id}/chat`、`/api/agents/{agent_id}/events` 是长实验防爆边界。
 - `/api/admin/purge-branch` 是破坏性维护接口，只允许清理非 `main` 分支。它会删除该分支相关事件、帖子、聊天和纠错记录，并临时移除再恢复 `event_logs_no_delete` trigger。
+
+## 修改后端前必须知道的实现现状
+
+下面这些是代码里的真实行为，很容易在快速阅读时漏掉：
+
+- `core_memory_service.py` 会把 `User.core_memory` 规范化为 4 个字段，不是 3 个。老数据可能没有 `communication_style`，所以读取前总是先 normalize。
+- `create_or_update_agent_for_user()` 不只是首次创建时才重要。用户重新提交问卷后，它会更新现有 `Agent.system_prompt_base`，并追加 `AGENT_PROFILE_UPDATED` 事件。
+- `post_crud.create_post()` 和 `feedback_crud.create_feedback_log()` 都会同步追加 `EventLog`，分支广场显示是靠这些事件重建出来的。
+- 广场纠错是“投影覆盖”而不是“原地修改”：`FeedbackLog`/`FEEDBACK_CREATED` 记录保存改写结果，渲染 feed 时按分支找到最新纠错文本覆盖展示，`posts` 表原始内容仍保留。
+- `chat_crud.create_chat_log()` 保存聊天后还会追加 `MESSAGE_RECEIVED` 事件；聊天历史页面读的是有界事件切片，而不是无脑全量读 `ChatLog`。
+- `TimeMachine` 故意不把回放出来的完整聊天文本塞进 prompt 状态，它主要重建的是 compact state：规范化 core memory、反事实覆盖、关系分数，以及一段短 `current_core_memory`。
+- `GET /api/agents/{agent_id}/events` 当前路由层只有 Agent 是否存在的检查和分页，没有强制 bearer 所有权或 admin 鉴权。实际使用时应把它视为内部研究接口，后续如果做外部部署需要补强。
+- `POST /api/simulation/fork` 目前是从 `main` 回滚并 fork，不是从任意非主分支继续分叉。
+- `POST /api/agents/{agent_id}/import_chat` 现在写入向量记忆时固定使用 `branch_id=\"main\"`。
+- 用户侧的记忆上传/搜索接口也没有暴露分支参数，所以目前向量记忆大体仍是主世界线视角；分支差异主要靠 `EventLog` + `TimeMachine`。
+- 关系加权的“个性化广场”逻辑已经落在 `post_crud.get_posts_for_viewer()` 和 `/api/agents/*/feed-preview` 两处，不要无意中把它们全部回退成纯时间倒序。
+
+## 后端服务地图
+
+这部分适合在你不知道“真实责任应该去哪找”时快速定位：
+
+- `backend/app/main.py`：FastAPI 组装、middleware、router 挂载、`.env` 读取、建表和可选 RAG 预热。
+- `backend/app/security.py`：bearer token、管理员 key、请求体大小限制、内存限流、安全响应头、trusted host。
+- `backend/app/database.py`：SQLAlchemy engine/session，以及 SQLite 的轻量 schema 升级和 `event_logs` append-only trigger。
+- `backend/app/models.py`：核心研究数据模型，统一 second precision 时间戳。
+- `backend/app/services/event_store.py`：追加不可变 `EventLog` 的标准入口，负责 JSON-safe payload 和日志。
+- `backend/app/services/branching.py`：分支 id 规范化、分支存在性、全局分支列表、fork 锚点推导。
+- `backend/app/services/time_machine.py`：按分支回放事件并重建 Agent 紧凑状态，是反事实实验的核心。
+- `backend/app/services/core_memory_service.py`：Core Memory 规范化、prompt 格式化、显式修改和反思合并写回。
+- `backend/app/services/tools.py`：Agent 在私聊中可调用的工具层。如果一个能力属于“Agent 主动感知/行动”，通常应放在这里。
+- `backend/app/services/agent_graph.py`：LangGraph 运行时心智回路，管理 working memory、topic summaries、emotion/energy 和工具绑定。
+- `backend/app/services/llm_service.py`：DeepSeek 请求参数、发帖生成、私聊生成、tool-calling 编排、fallback 路径、历史聊天按需加载。
+- `backend/app/services/rag_service.py`：Chroma 持久化、BGE embedding/reranker、chunking、hybrid retrieval、预热与严格模式。
+- `backend/app/services/consolidation_service.py`：过去 24 小时记录收集、睡眠式巩固、关系更新、episodic memory 写入、working memory 清空。
+- `backend/app/services/feedback_service.py`：帖子纠错后的反思与合并路径。
+
+## 事件类型速记
+
+排查分支、时间机器或数据导出时，最常见的是这些事件类型：
+
+- `AGENT_CREATED`：用户首次生成 Agent。
+- `AGENT_PROFILE_UPDATED`：用户重新提交问卷/资料后，Agent 基础 prompt 和画像更新。
+- `POST_CREATED`：广场新帖。
+- `FEEDBACK_CREATED`：用户对帖子提交纠错，feed 投影可能因此显示改写文本。
+- `MESSAGE_RECEIVED`：一次私聊 turn 已保存。
+- `CORE_MEMORY_UPDATED`：长期身份记忆发生变化，来源可能是工具调用或睡眠巩固。
+- `RELATIONSHIP_CHANGED`：Agent 间有向关系分数更新。
+- `WORKING_MEMORY_CLEARED`：短期工作记忆被手动清空。
+- `COUNTERFACTUAL_EVENT` 或自定义注入事件：某条非主分支时间线被注入了反事实干预。
 
 ## 核心数据流转 (Data Flow)
 
@@ -498,6 +565,17 @@ BASIC_AUTH_SESSION_SECONDS=43200
 - `src/components/NavBar.tsx`：全局顶部导航，`/site-login` 隐藏。
 - `src/components/BranchSelector.tsx`：多个页面复用的分支选择控件。
 - `src/components/TimeMachinePanel.tsx`：时间机器完整交互逻辑。
+
+## 改动前自检清单
+
+修改核心逻辑前后，至少确认这些不变量仍然成立：
+
+- 所有分支相关读路径都继续使用 `normalize_branch_id()`，并正确尊重父分支 lineage 或 fork anchor。
+- 任何会影响模拟状态或分支重建的新写路径，都有对应 `EventLog` 追加。
+- 广场、聊天、事件历史接口仍然维持分页和有界 `limit`。
+- `.env` 里的敏感值不会进入日志、响应、截图或 Git 提交。
+- 本地开发服务仍然绑定 `127.0.0.1`。
+- 前端新增 API 路径要么走现有 `/api/*` rewrite，要么像 `/health` 一样在文档里明确写清楚特殊性。
 
 ## 典型完整测试流程
 

@@ -70,6 +70,12 @@ def login_user(user_in: UserLogin, db: Session = Depends(get_db)) -> AuthSession
     )
 
 
+@router.get("/me", response_model=UserOut)
+def get_me(current_user=Depends(get_current_user)) -> UserOut:
+    """Return the authenticated user for client-side session checks."""
+    return current_user
+
+
 @router.get("/agent-choices", response_model=list[AgentSessionChoiceOut])
 def list_agent_session_choices(
     db: Session = Depends(get_db),

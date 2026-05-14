@@ -13,7 +13,18 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import models  # noqa: F401
 from .database import Base, engine, ensure_sqlite_schema
-from .routers import admin, chat, export, memory, posts, simulate, simulation, users
+from .routers import (
+    admin,
+    chat,
+    counterfactuals,
+    export,
+    memory,
+    posts,
+    probes,
+    simulate,
+    simulation,
+    users,
+)
 from .security import (
     RateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -99,6 +110,8 @@ app.add_middleware(
 )
 
 app.include_router(posts.router)
+app.include_router(probes.router)
+app.include_router(counterfactuals.router)
 app.include_router(simulate.router)
 app.include_router(simulation.router)
 app.include_router(chat.router)
