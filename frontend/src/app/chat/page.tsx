@@ -3,14 +3,17 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLanguage } from "@/components/LanguageContext";
-import { Agent, ChatReply, apiRequest } from "@/lib/api";
+import { Agent, ChatReply, DriftCheckResponse, apiRequest } from "@/lib/api";
 import { LoopSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime } from "@/lib/time";
 
 const DEFAULT_BRANCH_ID = "main";
 const CHAT_HISTORY_PAGE_SIZE = 15;
 const CHAT_MODEL_STORAGE_KEY = "loop_chat_model";
-const CHAT_BRANCH_STORAGE_PREFIX = "loop_chat_branch";
+const EXPERIMENT_MODE_STORAGE_KEY = "loop_experiment_mode";
+const CHAT_TOPIC_STORAGE_KEY = "loop_chat_topic";
+const DEFAULT_CHAT_TOPIC = "general";
+const CHAT_TOPICS = ["general", "daily_life", "relationships", "work", "identity"];
 
 const BRANCHES_ENDPOINT = (agentId: number) =>
   `/api/simulation/agents/${agentId}/branches`;
@@ -18,10 +21,17 @@ const BRANCHES_ENDPOINT = (agentId: number) =>
 const CHAT_HISTORY_ENDPOINT = (
   agentId: number,
   branchId: string,
+  sessionId: string,
   skip = 0,
   limit = CHAT_HISTORY_PAGE_SIZE,
 ) =>
-  `/api/agents/${agentId}/chat?branch_id=${encodeURIComponent(branchId)}&skip=${skip}&limit=${limit}`;
+  `/api/agents/${agentId}/chat?branch_id=${encodeURIComponent(branchId)}&session_id=${encodeURIComponent(sessionId)}&skip=${skip}&limit=${limit}`;
+
+const DRIFT_CHECK_ENDPOINT = (agentId: number) =>
+  `/api/chat/${agentId}/check-drift`;
+
+const CHAT_SESSIONS_ENDPOINT = (agentId: number, branchId: string) =>
+  `/api/chat/${agentId}/sessions?branch_id=${encodeURIComponent(branchId)}`;
 
 type ChatMessage = {
   id: string;
@@ -30,10 +40,22 @@ type ChatMessage = {
   timestamp: string;
   memoryChunksUsed?: number;
   modelUsed?: ChatModelChoice;
+  experimentMode?: ExperimentModeChoice;
+  topic?: string;
   warning?: string | null;
 };
 
 type ChatModelChoice = "fast" | "deep";
+type ExperimentModeChoice = "mode_alpha" | "mode_beta";
+
+type ChatSessionSummary = {
+  branch_id: string;
+  session_id: string;
+  first_message: string;
+  latest_message: string;
+  latest_timestamp: string;
+  turn_count: number;
+};
 
 type ChatLog = {
   id: number;
@@ -42,13 +64,38 @@ type ChatLog = {
   agent_reply: string;
   timestamp: string;
   branch_id?: string;
+  session_id?: string;
+  topic?: string;
+  experiment_mode?: ExperimentModeChoice;
   memory_chunks_used?: number;
   model_used?: ChatModelChoice;
   warning?: string | null;
 };
 
+type MemoryDiagnostic = {
+  kind: "identity" | "semantic" | "episodic";
+  summary: string;
+};
+
+type DeveloperSnapshot = {
+  queryRoute: string;
+  topic: string;
+  lastQuery: string;
+  memoryDiagnostics: MemoryDiagnostic[];
+  driftProbability: number | null;
+  driftReason: string;
+  updatedAt: string;
+};
+
 function nowIso() {
   return new Date().toISOString();
+}
+
+function createSessionId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function loadChatModel(): ChatModelChoice {
@@ -58,19 +105,32 @@ function loadChatModel(): ChatModelChoice {
   return localStorage.getItem(CHAT_MODEL_STORAGE_KEY) === "deep" ? "deep" : "fast";
 }
 
-function branchStorageKey(agentId: number) {
-  return `${CHAT_BRANCH_STORAGE_PREFIX}_${agentId}`;
-}
-
-function loadBranchPreference(agentId: number) {
+function loadExperimentMode(): ExperimentModeChoice {
   if (typeof window === "undefined") {
-    return DEFAULT_BRANCH_ID;
+    return "mode_alpha";
   }
-  return localStorage.getItem(branchStorageKey(agentId)) || DEFAULT_BRANCH_ID;
+  const storedMode = localStorage.getItem(EXPERIMENT_MODE_STORAGE_KEY);
+  if (storedMode === "mode_beta" || storedMode === "static_prompt") {
+    return "mode_beta";
+  }
+  return "mode_alpha";
 }
 
-function saveBranchPreference(agentId: number, branchId: string) {
-  localStorage.setItem(branchStorageKey(agentId), branchId);
+function loadChatTopic() {
+  if (typeof window === "undefined") {
+    return DEFAULT_CHAT_TOPIC;
+  }
+  return localStorage.getItem(CHAT_TOPIC_STORAGE_KEY) || DEFAULT_CHAT_TOPIC;
+}
+
+function truncateSummary(value: string, fallback: string, maxLength = 42) {
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  return trimmed.length > maxLength
+    ? `${trimmed.slice(0, maxLength - 1)}...`
+    : trimmed;
 }
 
 export default function ChatPage() {
@@ -87,21 +147,43 @@ export default function ChatPage() {
   } | null>(null);
   const [session, setSession] = useState<LoopSession | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
   const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
-  const [historySkip, setHistorySkip] = useState(CHAT_HISTORY_PAGE_SIZE);
-  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [currentSessionId, setCurrentSessionId] = useState("");
+  const [historySkip, setHistorySkip] = useState(0);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingOlderHistory, setIsLoadingOlderHistory] = useState(false);
   const [chatModel, setChatModel] = useState<ChatModelChoice>("fast");
+  const [experimentMode, setExperimentMode] =
+    useState<ExperimentModeChoice>("mode_alpha");
+  const [currentTopic, setCurrentTopic] = useState(DEFAULT_CHAT_TOPIC);
+  const [isDeveloperPanelOpen, setIsDeveloperPanelOpen] = useState(true);
+  const [developerSnapshot, setDeveloperSnapshot] =
+    useState<DeveloperSnapshot | null>(null);
+  const [latestDriftResult, setLatestDriftResult] =
+    useState<DriftCheckResponse | null>(null);
+  const [driftResult, setDriftResult] = useState<DriftCheckResponse | null>(null);
+  const [calibrationWrong, setCalibrationWrong] = useState("");
+  const [calibrationIdeal, setCalibrationIdeal] = useState("");
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const currentSession = chatSessions.find(
+    (chatSession) => chatSession.session_id === currentSessionId,
+  );
+  const currentSessionLabel = getSessionDisplayLabel(currentSessionId);
+  const visibleTimelineBranches = uniqueBranches([currentBranch, ...branches]);
 
   useEffect(() => {
     setChatModel(loadChatModel());
+    setExperimentMode(loadExperimentMode());
+    setCurrentTopic(loadChatTopic());
 
     async function bootstrap() {
       const storedSession = loadSession();
@@ -111,10 +193,10 @@ export default function ChatPage() {
       }
 
       if (storedSession.agent_id) {
-        const preferredBranch = loadBranchPreference(storedSession.agent_id);
-        setCurrentBranch(preferredBranch);
+        startNewConversation();
         setSession(storedSession);
-        loadChatHistory(storedSession.agent_id, preferredBranch);
+        loadBranches(storedSession.agent_id);
+        loadChatSessions(storedSession.agent_id, DEFAULT_BRANCH_ID);
         return;
       }
 
@@ -125,11 +207,11 @@ export default function ChatPage() {
           agent_id: agent.id,
           agent_name: agent.agent_name,
         };
-        const preferredBranch = loadBranchPreference(agent.id);
         saveSession(hydratedSession);
-        setCurrentBranch(preferredBranch);
+        startNewConversation();
         setSession(hydratedSession);
-        loadChatHistory(agent.id, preferredBranch);
+        loadBranches(agent.id);
+        loadChatSessions(agent.id, DEFAULT_BRANCH_ID);
       } catch {
         setSession(storedSession);
         setError(copy.noAgent);
@@ -138,14 +220,6 @@ export default function ChatPage() {
 
     bootstrap();
   }, [router]);
-
-  useEffect(() => {
-    if (!session?.agent_id) {
-      return;
-    }
-
-    loadBranches(session.agent_id);
-  }, [session?.agent_id]);
 
   useLayoutEffect(() => {
     const anchor = pendingScrollAnchorRef.current;
@@ -172,24 +246,46 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior });
   }
 
+  function getSessionDisplayLabel(sessionId: string) {
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) {
+      return copy.currentConversation;
+    }
+
+    const matchingSession = chatSessions.find(
+      (chatSession) => chatSession.session_id === normalizedSessionId,
+    );
+    return truncateSummary(
+      matchingSession?.first_message ?? currentSession?.first_message ?? "",
+      copy.currentConversation,
+    );
+  }
+
+  async function loadChatSessions(agentId: number, branchId = currentBranch) {
+    setIsLoadingSessions(true);
+    try {
+      const result = await apiRequest<unknown>(
+        CHAT_SESSIONS_ENDPOINT(agentId, branchId),
+      );
+      setChatSessions(normalizeChatSessions(result));
+    } catch (err) {
+      setNotice(
+        err instanceof Error
+          ? `${copy.loadSessionsFailed} ${err.message}`
+          : copy.loadSessionsFailed,
+      );
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  }
+
   async function loadBranches(agentId: number) {
     setIsLoadingBranches(true);
     try {
       const result = await apiRequest<unknown>(BRANCHES_ENDPOINT(agentId));
-      const branchList = normalizeBranches(result);
-      setBranches(branchList);
-
-      const preferredBranch = loadBranchPreference(agentId);
-      if (branchList.includes(preferredBranch)) {
-        setCurrentBranch(preferredBranch);
-      } else if (!branchList.includes(currentBranch)) {
-        setCurrentBranch(DEFAULT_BRANCH_ID);
-        saveBranchPreference(agentId, DEFAULT_BRANCH_ID);
-        loadChatHistory(agentId, DEFAULT_BRANCH_ID);
-      }
+      setBranches(normalizeBranches(result));
     } catch (err) {
       setBranches([DEFAULT_BRANCH_ID]);
-      setCurrentBranch(DEFAULT_BRANCH_ID);
       setNotice(
         err instanceof Error
           ? t.common.branchUnavailable(err.message)
@@ -200,19 +296,46 @@ export default function ChatPage() {
     }
   }
 
-  async function loadChatHistory(agentId: number, branchId: string) {
+  function startNewConversation() {
+    const nextSessionId = createSessionId();
+    historyRequestIdRef.current += 1;
+    pendingScrollAnchorRef.current = null;
+    setCurrentSessionId(nextSessionId);
+    setMessages([]);
+    setError("");
+    setNotice("");
+    setInput("");
+    setHistorySkip(0);
+    setHasMoreHistory(false);
+    setIsLoadingHistory(false);
+    setDriftResult(null);
+    setLatestDriftResult(null);
+    setDeveloperSnapshot(null);
+  }
+
+  async function loadChatHistory(
+    agentId: number,
+    branchId: string,
+    sessionId: string,
+  ) {
     const requestId = historyRequestIdRef.current + 1;
     historyRequestIdRef.current = requestId;
     pendingScrollAnchorRef.current = null;
     setMessages([]);
     setNotice("");
-    setHistorySkip(CHAT_HISTORY_PAGE_SIZE);
+    setHistorySkip(0);
     setHasMoreHistory(true);
     setIsLoadingHistory(true);
 
     try {
       const result = await apiRequest<unknown>(
-        CHAT_HISTORY_ENDPOINT(agentId, branchId, 0, CHAT_HISTORY_PAGE_SIZE),
+        CHAT_HISTORY_ENDPOINT(
+          agentId,
+          branchId,
+          sessionId,
+          0,
+          CHAT_HISTORY_PAGE_SIZE,
+        ),
       );
       if (historyRequestIdRef.current !== requestId) {
         return;
@@ -221,7 +344,7 @@ export default function ChatPage() {
       setHistorySkip(loadedTurns);
       setHasMoreHistory(loadedTurns === CHAT_HISTORY_PAGE_SIZE);
       shouldScrollToBottomRef.current = true;
-      setMessages(normalizeChatHistory(result, branchId));
+      setMessages(normalizeChatHistory(result, branchId, sessionId));
     } catch (err) {
       if (historyRequestIdRef.current !== requestId) {
         return;
@@ -229,8 +352,8 @@ export default function ChatPage() {
       setMessages([]);
       setNotice(
         err instanceof Error
-          ? copy.branchNotice(branchId, err.message)
-          : copy.branchNotice(branchId),
+          ? copy.branchNotice(getSessionDisplayLabel(sessionId), err.message)
+          : copy.branchNotice(getSessionDisplayLabel(sessionId)),
       );
     } finally {
       if (historyRequestIdRef.current === requestId) {
@@ -243,6 +366,7 @@ export default function ChatPage() {
     if (
       !session?.agent_id ||
       !currentBranch ||
+      !currentSessionId ||
       !hasMoreHistory ||
       isLoadingHistory ||
       isLoadingOlderHistory
@@ -259,6 +383,7 @@ export default function ChatPage() {
         CHAT_HISTORY_ENDPOINT(
           session.agent_id,
           currentBranch,
+          currentSessionId,
           historySkip,
           CHAT_HISTORY_PAGE_SIZE,
         ),
@@ -267,7 +392,11 @@ export default function ChatPage() {
         return;
       }
 
-      const olderMessages = normalizeChatHistory(result, currentBranch);
+      const olderMessages = normalizeChatHistory(
+        result,
+        currentBranch,
+        currentSessionId,
+      );
       const loadedTurns = countChatHistoryTurns(result);
       if (loadedTurns === 0 || olderMessages.length === 0) {
         setHasMoreHistory(false);
@@ -287,8 +416,8 @@ export default function ChatPage() {
     } catch (err) {
       setNotice(
         err instanceof Error
-          ? copy.branchNotice(currentBranch, err.message)
-          : copy.branchNotice(currentBranch),
+          ? copy.branchNotice(currentSessionLabel, err.message)
+          : copy.branchNotice(currentSessionLabel),
       );
     } finally {
       setIsLoadingOlderHistory(false);
@@ -297,15 +426,26 @@ export default function ChatPage() {
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session?.agent_id || !currentBranch || !input.trim()) {
+    if (!session?.agent_id || !currentBranch || !currentSessionId || !input.trim()) {
       return;
     }
 
     const content = input.trim();
     const localTimestamp = nowIso();
+    const topic = currentTopic.trim() || DEFAULT_CHAT_TOPIC;
     setInput("");
     setError("");
     setIsSending(true);
+    setDeveloperSnapshot({
+      queryRoute:
+        experimentMode === "mode_beta" ? "Static Baseline" : "Full IACL",
+      topic,
+      lastQuery: content,
+      memoryDiagnostics: [],
+      driftProbability: latestDriftResult?.drift_probability ?? null,
+      driftReason: latestDriftResult?.reason ?? "",
+      updatedAt: localTimestamp,
+    });
     shouldScrollToBottomRef.current = true;
     setMessages((current) => [
       ...current,
@@ -314,6 +454,7 @@ export default function ChatPage() {
         role: "user",
         content,
         timestamp: localTimestamp,
+        topic,
       },
     ]);
 
@@ -326,6 +467,9 @@ export default function ChatPage() {
             message: content,
             model: chatModel,
             branch_id: currentBranch,
+            session_id: currentSessionId,
+            topic,
+            experiment_mode: experimentMode,
           }),
         },
       );
@@ -340,11 +484,33 @@ export default function ChatPage() {
           timestamp: result.chat_log?.timestamp ?? nowIso(),
           memoryChunksUsed: result.memory_chunks_used,
           modelUsed: result.model_used,
+          experimentMode: result.chat_log?.experiment_mode ?? experimentMode,
+          topic: result.chat_log?.topic ?? topic,
           warning: result.warning,
         },
       ]);
+      setDeveloperSnapshot({
+        queryRoute:
+          result.query_route ??
+          (experimentMode === "mode_beta" ? "Static Baseline" : "Full IACL"),
+        topic,
+        lastQuery: content,
+        memoryDiagnostics: result.memory_diagnostics ?? [],
+        driftProbability: latestDriftResult?.drift_probability ?? null,
+        driftReason: latestDriftResult?.reason ?? "",
+        updatedAt: nowIso(),
+      });
       if (result.chat_log) {
         setHistorySkip((current) => current + 1);
+        void loadChatSessions(session.agent_id, currentBranch);
+        if (experimentMode === "mode_alpha") {
+          void checkDriftAfterReply(
+            session.agent_id,
+            currentBranch,
+            currentSessionId,
+            topic,
+          );
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.sendFailed);
@@ -353,9 +519,176 @@ export default function ChatPage() {
     }
   }
 
+  async function checkDriftAfterReply(
+    agentId: number,
+    branchId: string,
+    sessionId: string,
+    topic: string,
+  ) {
+    try {
+      const result = await apiRequest<DriftCheckResponse>(
+        DRIFT_CHECK_ENDPOINT(agentId),
+        {
+          method: "POST",
+          body: JSON.stringify({ branch_id: branchId, session_id: sessionId, topic }),
+        },
+      );
+      setLatestDriftResult(result);
+      setDeveloperSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              driftProbability: result.drift_probability,
+              driftReason: result.reason,
+              updatedAt: nowIso(),
+            }
+          : {
+              queryRoute: "Full IACL",
+              topic,
+              lastQuery: "",
+              memoryDiagnostics: [],
+              driftProbability: result.drift_probability,
+              driftReason: result.reason,
+              updatedAt: nowIso(),
+            },
+      );
+      if (result.is_drifting) {
+        setDriftResult(result);
+        setCalibrationWrong("");
+        setCalibrationIdeal("");
+      }
+    } catch (err) {
+      setNotice(
+        err instanceof Error
+          ? copy.driftDetectorSkipped(err.message)
+          : copy.driftDetectorSkipped(),
+      );
+    }
+  }
+
+  async function submitCalibration() {
+    if (!session?.agent_id || !currentBranch || !currentSessionId) {
+      return;
+    }
+
+    const wrong = calibrationWrong.trim();
+    const ideal = calibrationIdeal.trim();
+    if (!wrong || !ideal) {
+      setError(copy.calibrationRequired);
+      return;
+    }
+
+    const calibrationInstruction = copy.calibrationInstruction(wrong, ideal);
+
+    setError("");
+    setIsCalibrating(true);
+    try {
+      const result = await apiRequest<ChatReply>(
+        `/api/agents/${session.agent_id}/chat`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            message: calibrationInstruction,
+            model: "deep",
+            branch_id: currentBranch,
+            session_id: currentSessionId,
+            topic: currentTopic,
+            experiment_mode: "mode_alpha",
+          }),
+        },
+      );
+
+      const timestamp = result.chat_log?.timestamp ?? nowIso();
+      shouldScrollToBottomRef.current = true;
+      setMessages((current) => [
+        ...current,
+        {
+          id: `calibration-user-${Date.now()}`,
+          role: "user",
+          content: copy.calibrationUserMarker,
+          timestamp,
+        },
+        {
+          id: `calibration-agent-${result.chat_log?.id ?? Date.now()}`,
+          role: "agent",
+          content: result.reply,
+          timestamp,
+          memoryChunksUsed: result.memory_chunks_used,
+          modelUsed: result.model_used,
+          experimentMode: "mode_alpha",
+          topic: currentTopic,
+          warning: result.warning,
+        },
+      ]);
+      setDeveloperSnapshot({
+        queryRoute: result.query_route ?? "Full IACL",
+        topic: currentTopic,
+        lastQuery: calibrationInstruction,
+        memoryDiagnostics: result.memory_diagnostics ?? [],
+        driftProbability: null,
+        driftReason: "",
+        updatedAt: nowIso(),
+      });
+      if (result.chat_log) {
+        setHistorySkip((current) => current + 1);
+        void loadChatSessions(session.agent_id, currentBranch);
+      }
+      setDriftResult(null);
+      setCalibrationWrong("");
+      setCalibrationIdeal("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.sendFailed);
+    } finally {
+      setIsCalibrating(false);
+    }
+  }
+
   function updateChatModel(model: ChatModelChoice) {
     setChatModel(model);
     localStorage.setItem(CHAT_MODEL_STORAGE_KEY, model);
+  }
+
+  function updateExperimentMode(mode: ExperimentModeChoice) {
+    setExperimentMode(mode);
+    localStorage.setItem(EXPERIMENT_MODE_STORAGE_KEY, mode);
+  }
+
+  function updateCurrentTopic(topic: string) {
+    const nextTopic = topic.trim() || DEFAULT_CHAT_TOPIC;
+    setCurrentTopic(nextTopic);
+    localStorage.setItem(CHAT_TOPIC_STORAGE_KEY, nextTopic);
+    setDeveloperSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            topic: nextTopic,
+            updatedAt: nowIso(),
+          }
+        : current,
+    );
+  }
+
+  function openChatSession(sessionId: string) {
+    if (!session?.agent_id) {
+      return;
+    }
+
+    const nextSessionId = sessionId.trim();
+    if (!nextSessionId || nextSessionId === currentSessionId) {
+      return;
+    }
+    historyRequestIdRef.current += 1;
+    pendingScrollAnchorRef.current = null;
+    setCurrentSessionId(nextSessionId);
+    setMessages([]);
+    setError("");
+    setNotice("");
+    setHistorySkip(0);
+    setHasMoreHistory(true);
+    setDriftResult(null);
+    setLatestDriftResult(null);
+    setDeveloperSnapshot(null);
+    loadChatHistory(session.agent_id, currentBranch, nextSessionId);
   }
 
   function updateCurrentBranch(branchId: string) {
@@ -367,16 +700,20 @@ export default function ChatPage() {
     historyRequestIdRef.current += 1;
     pendingScrollAnchorRef.current = null;
     setCurrentBranch(nextBranch);
+    const nextSessionId = createSessionId();
+    setCurrentSessionId(nextSessionId);
+    setChatSessions([]);
     setMessages([]);
     setError("");
     setNotice("");
-    setHistorySkip(CHAT_HISTORY_PAGE_SIZE);
-    setHasMoreHistory(true);
-    saveBranchPreference(session.agent_id, nextBranch);
-    loadChatHistory(session.agent_id, nextBranch);
+    setInput("");
+    setHistorySkip(0);
+    setHasMoreHistory(false);
+    setDriftResult(null);
+    setLatestDriftResult(null);
+    setDeveloperSnapshot(null);
+    loadChatSessions(session.agent_id, nextBranch);
   }
-
-  const isMainBranch = currentBranch === DEFAULT_BRANCH_ID;
 
   if (!session) {
     return (
@@ -388,172 +725,498 @@ export default function ChatPage() {
 
   return (
     <main className="min-h-screen bg-gray-50">
-      <div className="mx-auto flex min-h-[calc(100vh-57px)] w-full max-w-3xl flex-col px-4 py-6 sm:px-6">
-        <header className="mb-5 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
-            Nightly Sync
-          </p>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-gray-950">
-            {copy.title}
-          </h1>
-          <p className="mt-2 text-sm leading-6 text-gray-500">
-            {copy.subtitle(session.agent_name ?? t.common.currentAgent)}
-          </p>
-          <div
-            className={`mt-4 rounded-2xl border px-4 py-4 ${
-              isMainBranch
-                ? "border-gray-200 bg-gray-50"
-                : "border-purple-200 bg-purple-50"
-            }`}
-          >
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p
-                  className={`text-xs font-semibold uppercase tracking-wide ${
-                    isMainBranch ? "text-gray-500" : "text-purple-600"
-                  }`}
-                >
-                  {copy.currentTimeline}
+      <div className="mx-auto w-full max-w-[1500px] px-3 py-4 sm:px-5">
+        <div className="flex min-h-[calc(100vh-89px)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm lg:flex-row">
+          <aside className="flex w-full flex-col bg-gray-950 text-gray-100 md:w-[260px] md:shrink-0">
+            <div className="border-b border-white/10 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                {copy.sidebarTitle}
+              </p>
+              <button
+                className="mt-3 w-full rounded-lg bg-white px-4 py-3 text-left text-sm font-semibold text-gray-950 shadow-sm transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!session.agent_id || isSending}
+                onClick={() => startNewConversation()}
+                type="button"
+              >
+                {copy.newConversation}
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+              <div className="mb-2 flex items-center justify-between px-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  {copy.history}
                 </p>
-                <p
-                  className={`mt-1 text-base font-semibold ${
-                    isMainBranch ? "text-gray-950" : "text-purple-950"
-                  }`}
-                >
-                  {copy.currentTimelineValue(currentBranch)}
-                </p>
-              </div>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <select
-                  className={`rounded-full border px-4 py-2 text-sm font-medium outline-none transition ${
-                    isMainBranch
-                      ? "border-gray-200 bg-white text-gray-900 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                      : "border-purple-200 bg-white text-purple-950 focus:border-purple-400 focus:ring-4 focus:ring-purple-100"
-                  }`}
-                  disabled={isLoadingBranches || isSending}
-                  onChange={(event) => updateCurrentBranch(event.target.value)}
-                  value={currentBranch}
-                >
-                  {branches.map((branchId) => (
-                    <option key={branchId} value={branchId}>
-                      {branchId}
-                    </option>
-                  ))}
-                </select>
                 <button
-                  className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!session.agent_id || isLoadingBranches}
-                  onClick={() => session.agent_id && loadBranches(session.agent_id)}
+                  className="text-xs font-medium text-gray-400 transition hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!session.agent_id || isLoadingSessions}
+                  onClick={() =>
+                    session.agent_id && loadChatSessions(session.agent_id)
+                  }
                   type="button"
                 >
-                  {isLoadingBranches ? t.common.loading : t.common.refreshBranches}
+                  {isLoadingSessions ? t.common.loading : copy.refreshHistory}
                 </button>
               </div>
+
+              {chatSessions.length === 0 ? (
+                <p className="rounded-lg px-3 py-3 text-sm text-gray-500">
+                  {copy.noSessions}
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {chatSessions.map((chatSession) => {
+                    const isActive = chatSession.session_id === currentSessionId;
+                    return (
+                      <button
+                        className={`w-full rounded-lg px-3 py-3 text-left transition ${
+                          isActive
+                            ? "bg-white/15 text-white"
+                            : "text-gray-300 hover:bg-white/10 hover:text-white"
+                        }`}
+                        key={chatSession.session_id}
+                        onClick={() => openChatSession(chatSession.session_id)}
+                        type="button"
+                      >
+                        <span className="block truncate text-sm font-medium">
+                          {chatSession.latest_message || copy.sessionUntitled}
+                        </span>
+                        <span className="mt-1 block text-xs text-gray-500">
+                          {formatFeedTime(chatSession.latest_timestamp)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <div className="flex min-w-0 flex-1 flex-col">
+            <header className="border-b border-gray-200 bg-white px-5 py-4">
+              <div className="mx-auto w-full max-w-5xl space-y-4">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+                    {copy.currentSession}
+                  </p>
+                  <h1 className="mt-1 max-w-xl text-2xl font-bold tracking-tight text-gray-950">
+                    {copy.title}
+                  </h1>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+                    {copy.subtitle(session.agent_name ?? t.common.currentAgent)}
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-gray-400">
+                    {copy.branchLabel}: {currentBranch}
+                    <span className="mx-2 text-gray-300">/</span>
+                    {copy.currentConversation}: {currentSessionLabel}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)_minmax(12rem,1fr)_auto] xl:items-end">
+                  <label className="block min-w-0">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      {copy.currentTimeline}
+                    </span>
+                    <select
+                      className="mt-2 w-full rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      disabled={isLoadingBranches || isSending}
+                      onChange={(event) =>
+                        updateCurrentBranch(event.target.value)
+                      }
+                      value={currentBranch}
+                    >
+                      {visibleTimelineBranches.map((branchId) => (
+                        <option key={branchId} value={branchId}>
+                          {branchId}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="self-end rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 sm:w-full xl:w-auto"
+                    disabled={!session.agent_id || isLoadingBranches}
+                    onClick={() =>
+                      session.agent_id && loadBranches(session.agent_id)
+                    }
+                    type="button"
+                  >
+                    {isLoadingBranches
+                      ? t.common.loading
+                      : t.common.refreshBranches}
+                  </button>
+                  <label className="block min-w-0 sm:col-span-2 xl:col-span-1">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                      {copy.experimentMode}
+                    </span>
+                    <select
+                      className="mt-2 w-full rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      disabled={isSending || Boolean(driftResult)}
+                      id="experiment-mode"
+                      onChange={(event) =>
+                        updateExperimentMode(
+                          event.target.value as ExperimentModeChoice,
+                        )
+                      }
+                      value={experimentMode}
+                    >
+                      <option value="mode_alpha">
+                        {copy.experimentModes.mode_alpha}
+                      </option>
+                      <option value="mode_beta">
+                        {copy.experimentModes.mode_beta}
+                      </option>
+                    </select>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                      {copy.currentTopic}
+                    </span>
+                    <select
+                      className="mt-2 w-full rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      disabled={isSending || Boolean(driftResult)}
+                      onChange={(event) => updateCurrentTopic(event.target.value)}
+                      value={currentTopic}
+                    >
+                      {CHAT_TOPICS.map((topic) => (
+                        <option key={topic} value={topic}>
+                          {(copy.topics as Record<string, string>)[topic] ?? topic}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="self-end rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition hover:border-indigo-200 hover:bg-indigo-50 hover:text-indigo-700 xl:w-auto"
+                    onClick={() =>
+                      setIsDeveloperPanelOpen((isOpen) => !isOpen)
+                    }
+                    type="button"
+                  >
+                    {isDeveloperPanelOpen
+                      ? copy.hideDeveloperTools
+                      : copy.showDeveloperTools}
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6">
+              {error ? (
+                <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {error}
+                </div>
+              ) : null}
+              {notice ? (
+                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                  {notice}
+                </div>
+              ) : null}
+
+              <section
+                className="min-h-0 flex-1 space-y-4 overflow-y-auto rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
+                ref={scrollContainerRef}
+              >
+                {isLoadingHistory ? (
+                  <div className="flex min-h-64 items-center justify-center text-center">
+                    <div>
+                      <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-gray-200 border-t-purple-500" />
+                      <p className="mt-3 text-sm font-medium text-gray-500">
+                        {copy.loadHistory(currentSessionLabel)}
+                      </p>
+                    </div>
+                  </div>
+                ) : messages.length === 0 ? (
+                  <div className="flex min-h-64 items-center justify-center text-center">
+                    <div>
+                      <p className="text-base font-semibold text-gray-900">
+                        {copy.startTitle}
+                      </p>
+                      <p className="mt-2 max-w-sm text-sm leading-6 text-gray-500">
+                        {copy.startHelp}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="sticky top-0 z-10 -mx-4 flex justify-center bg-white/90 px-4 pb-2 pt-1 backdrop-blur">
+                      <button
+                        className="rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-500 shadow-sm transition hover:border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!hasMoreHistory || isLoadingOlderHistory}
+                        onClick={loadOlderChatHistory}
+                        type="button"
+                      >
+                        {!hasMoreHistory
+                          ? copy.noPreviousMessages
+                          : isLoadingOlderHistory
+                            ? copy.loadingPreviousMessages
+                            : copy.loadPreviousMessages}
+                      </button>
+                    </div>
+                    {messages.map((message) => (
+                      <ChatBubble key={message.id} message={message} />
+                    ))}
+                  </>
+                )}
+                <div ref={bottomRef} />
+              </section>
+
+              <form
+                className="mt-4 space-y-3 rounded-2xl border border-gray-200 bg-white/95 p-3 shadow-lg shadow-gray-200/70"
+                onSubmit={sendMessage}
+              >
+                <div className="flex items-center justify-between gap-3 px-2">
+                  <label
+                    className="text-xs font-semibold uppercase tracking-wide text-gray-500"
+                    htmlFor="chat-model"
+                  >
+                    {copy.model}
+                  </label>
+                  <select
+                    className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                    disabled={isSending}
+                    id="chat-model"
+                    onChange={(event) =>
+                      updateChatModel(event.target.value as ChatModelChoice)
+                    }
+                    value={chatModel}
+                  >
+                    <option value="fast">DeepSeek Chat</option>
+                    <option value="deep">DeepSeek V4 Pro</option>
+                  </select>
+                </div>
+
+                <div className="flex gap-3">
+                  <input
+                    className="min-w-0 flex-1 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
+                    disabled={
+                      !session.agent_id ||
+                      !currentBranch ||
+                      !currentSessionId ||
+                      isSending ||
+                      Boolean(driftResult)
+                    }
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder={copy.placeholder}
+                    value={input}
+                  />
+                  <button
+                    className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={
+                      !session.agent_id ||
+                      !currentBranch ||
+                      !currentSessionId ||
+                      isSending ||
+                      Boolean(driftResult) ||
+                      !input.trim()
+                    }
+                    type="submit"
+                  >
+                    {isSending ? t.common.sending : copy.send}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
-        </header>
-
-        {error ? (
-          <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-            {error}
-          </div>
-        ) : null}
-        {notice ? (
-          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-            {notice}
-          </div>
-        ) : null}
-
-        <section
-          className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
-          ref={scrollContainerRef}
-        >
-          {isLoadingHistory ? (
-            <div className="flex min-h-64 items-center justify-center text-center">
-              <div>
-                <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-gray-200 border-t-purple-500" />
-                <p className="mt-3 text-sm font-medium text-gray-500">
-                  {copy.loadHistory(currentBranch)}
-                </p>
-              </div>
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="flex min-h-64 items-center justify-center text-center">
-              <div>
-                <p className="text-base font-semibold text-gray-900">
-                  {copy.startTitle}
-                </p>
-                <p className="mt-2 max-w-sm text-sm leading-6 text-gray-500">
-                  {copy.startHelp}
-                </p>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="sticky top-0 z-10 -mx-4 flex justify-center bg-white/90 px-4 pb-2 pt-1 backdrop-blur">
-                <button
-                  className="rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-500 shadow-sm transition hover:border-gray-300 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!hasMoreHistory || isLoadingOlderHistory}
-                  onClick={loadOlderChatHistory}
-                  type="button"
-                >
-                  {!hasMoreHistory
-                    ? copy.noPreviousMessages
-                    : isLoadingOlderHistory
-                      ? copy.loadingPreviousMessages
-                      : copy.loadPreviousMessages}
-                </button>
-              </div>
-              {messages.map((message) => (
-                <ChatBubble key={message.id} message={message} />
-              ))}
-            </>
-          )}
-          <div ref={bottomRef} />
-        </section>
-
-        <form className="mt-4 space-y-3" onSubmit={sendMessage}>
-          <div className="flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
-            <label
-              className="text-xs font-semibold uppercase tracking-wide text-gray-500"
-              htmlFor="chat-model"
-            >
-              {copy.model}
-            </label>
-            <select
-              className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-              disabled={isSending}
-              id="chat-model"
-              onChange={(event) =>
-                updateChatModel(event.target.value as ChatModelChoice)
-              }
-              value={chatModel}
-            >
-              <option value="fast">DeepSeek Chat</option>
-              <option value="deep">DeepSeek V4 Pro</option>
-            </select>
-          </div>
-
-          <div className="flex gap-3">
-            <input
-              className="min-w-0 flex-1 rounded-full border border-gray-200 bg-white px-5 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-              disabled={!session.agent_id || !currentBranch || isSending}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder={copy.placeholder(currentBranch)}
-              value={input}
+          {isDeveloperPanelOpen ? (
+            <DeveloperPanel
+              currentBranch={currentBranch}
+              currentSessionLabel={currentSessionLabel}
+              currentTopic={currentTopic}
+              driftResult={latestDriftResult}
+              experimentMode={experimentMode}
+              isSending={isSending}
+              snapshot={developerSnapshot}
             />
-            <button
-              className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!session.agent_id || !currentBranch || isSending || !input.trim()}
-              type="submit"
-            >
-              {isSending ? t.common.sending : copy.send}
-            </button>
-          </div>
-        </form>
+          ) : null}
+        </div>
       </div>
+      {driftResult ? (
+        <CalibrationModal
+          calibrationIdeal={calibrationIdeal}
+          calibrationWrong={calibrationWrong}
+          driftResult={driftResult}
+          isCalibrating={isCalibrating}
+          onCalibrationIdealChange={setCalibrationIdeal}
+          onCalibrationWrongChange={setCalibrationWrong}
+          onSubmit={submitCalibration}
+        />
+      ) : null}
     </main>
   );
+}
+
+function driftRiskTone(probability: number | null | undefined) {
+  if (probability === null || probability === undefined) {
+    return {
+      bar: "bg-gray-200",
+      text: "text-gray-500",
+      label: "N/A",
+      percent: 0,
+    };
+  }
+  const percent = Math.round(Math.max(0, Math.min(1, probability)) * 100);
+  if (probability >= 0.7) {
+    return { bar: "bg-rose-500", text: "text-rose-700", label: "High", percent };
+  }
+  if (probability >= 0.35) {
+    return {
+      bar: "bg-amber-400",
+      text: "text-amber-700",
+      label: "Medium",
+      percent,
+    };
+  }
+  return { bar: "bg-emerald-500", text: "text-emerald-700", label: "Low", percent };
+}
+
+function DeveloperPanel({
+  currentBranch,
+  currentSessionLabel,
+  currentTopic,
+  driftResult,
+  experimentMode,
+  isSending,
+  snapshot,
+}: {
+  currentBranch: string;
+  currentSessionLabel: string;
+  currentTopic: string;
+  driftResult: DriftCheckResponse | null;
+  experimentMode: ExperimentModeChoice;
+  isSending: boolean;
+  snapshot: DeveloperSnapshot | null;
+}) {
+  const { t } = useLanguage();
+  const copy = t.chat.developerTools;
+  const route =
+    snapshot?.queryRoute ??
+    (experimentMode === "mode_beta" ? "Static Baseline" : "Full IACL");
+  const probability =
+    driftResult?.drift_probability ?? snapshot?.driftProbability ?? null;
+  const risk = driftRiskTone(probability);
+  const memories = snapshot?.memoryDiagnostics ?? [];
+
+  return (
+    <aside className="flex w-full shrink-0 flex-col border-t border-gray-200 bg-gray-50 lg:w-[340px] lg:border-l lg:border-t-0">
+      <div className="border-b border-gray-200 bg-white px-4 py-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+          {copy.eyebrow}
+        </p>
+        <h2 className="mt-1 text-lg font-bold text-gray-950">{copy.title}</h2>
+        <p className="mt-2 text-xs leading-5 text-gray-500">
+          {currentBranch} / {currentSessionLabel} /{" "}
+          {(t.chat.topics as Record<string, string>)[currentTopic] ?? currentTopic}
+        </p>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {copy.route}
+            </span>
+            {isSending ? (
+              <span className="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-600">
+                {copy.live}
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-2 text-sm font-semibold text-gray-950">{route}</p>
+          {snapshot?.lastQuery ? (
+            <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">
+              {snapshot.lastQuery}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {copy.driftProbability}
+            </span>
+            <span className={`text-xs font-bold ${risk.text}`}>{risk.label}</span>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-100">
+            <div
+              className={`h-full rounded-full transition-all ${risk.bar}`}
+              style={{ width: `${risk.percent}%` }}
+            />
+          </div>
+          <p className={`mt-2 text-2xl font-bold ${risk.text}`}>
+            {probability === null || probability === undefined
+              ? "N/A"
+              : `${risk.percent}%`}
+          </p>
+          {driftResult?.reason || snapshot?.driftReason ? (
+            <p className="mt-2 text-xs leading-5 text-gray-500">
+              {driftResult?.reason ?? snapshot?.driftReason}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+            {copy.memories}
+          </span>
+          <div className="mt-3 space-y-2">
+            {memories.length > 0 ? (
+              memories.map((memory, index) => (
+                <article
+                  className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2"
+                  key={`${memory.kind}-${index}`}
+                >
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                    {copy.memoryKinds[memory.kind]}
+                  </p>
+                  <p className="mt-1 line-clamp-4 text-xs leading-5 text-gray-700">
+                    {memory.summary}
+                  </p>
+                </article>
+              ))
+            ) : (
+              <p className="rounded-lg border border-dashed border-gray-200 px-3 py-5 text-center text-xs text-gray-400">
+                {copy.noMemories}
+              </p>
+            )}
+          </div>
+        </section>
+      </div>
+    </aside>
+  );
+}
+
+function normalizeChatSessions(result: unknown): ChatSessionSummary[] {
+  const rawSessions = Array.isArray(result)
+    ? result
+    : result && typeof result === "object"
+      ? "sessions" in result
+        ? (result as { sessions?: unknown }).sessions
+        : undefined
+      : undefined;
+
+  if (!Array.isArray(rawSessions)) {
+    return [];
+  }
+
+  return rawSessions.flatMap((item): ChatSessionSummary[] => {
+    if (!item || typeof item !== "object" || !("session_id" in item)) {
+      return [];
+    }
+    const summary = item as Partial<ChatSessionSummary>;
+    const sessionId = String(summary.session_id ?? "").trim();
+    if (!sessionId) {
+      return [];
+    }
+    return [
+      {
+        branch_id: String(summary.branch_id ?? DEFAULT_BRANCH_ID).trim(),
+        session_id: sessionId,
+        first_message: String(summary.first_message ?? ""),
+        latest_message: String(summary.latest_message ?? ""),
+        latest_timestamp: String(summary.latest_timestamp ?? nowIso()),
+        turn_count: Number(summary.turn_count ?? 0),
+      },
+    ];
+  });
 }
 
 function normalizeBranches(result: unknown) {
@@ -585,7 +1248,23 @@ function normalizeBranches(result: unknown) {
   return uniqueBranches([DEFAULT_BRANCH_ID, ...branches]);
 }
 
-function normalizeChatHistory(result: unknown, branchId: string): ChatMessage[] {
+function uniqueBranches(branches: string[]) {
+  return Array.from(new Set(branches.filter(Boolean))).sort((left, right) => {
+    if (left === DEFAULT_BRANCH_ID) {
+      return -1;
+    }
+    if (right === DEFAULT_BRANCH_ID) {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function normalizeChatHistory(
+  result: unknown,
+  branchId: string,
+  sessionId: string,
+): ChatMessage[] {
   const rawLogs = Array.isArray(result)
     ? result
     : result && typeof result === "object"
@@ -614,12 +1293,14 @@ function normalizeChatHistory(result: unknown, branchId: string): ChatMessage[] 
       }
       return [
         {
-          id: message.id ?? `${branchId}-message-${index}`,
+          id: message.id ?? `${branchId}-${sessionId}-message-${index}`,
           role: message.role,
           content: String(message.content ?? ""),
           timestamp: message.timestamp ?? nowIso(),
           memoryChunksUsed: message.memoryChunksUsed,
           modelUsed: message.modelUsed,
+          experimentMode: message.experimentMode,
+          topic: message.topic,
           warning: message.warning,
         },
       ];
@@ -630,18 +1311,21 @@ function normalizeChatHistory(result: unknown, branchId: string): ChatMessage[] 
       const timestamp = chatLog.timestamp ?? nowIso();
       return [
         {
-          id: `${branchId}-user-${chatLog.id ?? index}`,
+          id: `${branchId}-${sessionId}-user-${chatLog.id ?? index}`,
           role: "user" as const,
           content: String(chatLog.user_message ?? ""),
           timestamp,
+          topic: chatLog.topic ?? DEFAULT_CHAT_TOPIC,
         },
         {
-          id: `${branchId}-agent-${chatLog.id ?? index}`,
+          id: `${branchId}-${sessionId}-agent-${chatLog.id ?? index}`,
           role: "agent" as const,
           content: String(chatLog.agent_reply ?? ""),
           timestamp,
           memoryChunksUsed: chatLog.memory_chunks_used,
           modelUsed: chatLog.model_used,
+          experimentMode: chatLog.experiment_mode,
+          topic: chatLog.topic ?? DEFAULT_CHAT_TOPIC,
           warning: chatLog.warning,
         },
       ];
@@ -667,20 +1351,95 @@ function countChatHistoryTurns(result: unknown) {
   return Array.isArray(rawLogs) ? rawLogs.length : 0;
 }
 
-function uniqueBranches(branches: string[]) {
-  return Array.from(new Set(branches)).sort((left, right) => {
-    if (left === DEFAULT_BRANCH_ID) {
-      return -1;
-    }
-    if (right === DEFAULT_BRANCH_ID) {
-      return 1;
-    }
-    return left.localeCompare(right);
-  });
+function CalibrationModal({
+  calibrationIdeal,
+  calibrationWrong,
+  driftResult,
+  isCalibrating,
+  onCalibrationIdealChange,
+  onCalibrationWrongChange,
+  onSubmit,
+}: {
+  calibrationIdeal: string;
+  calibrationWrong: string;
+  driftResult: DriftCheckResponse;
+  isCalibrating: boolean;
+  onCalibrationIdealChange: (value: string) => void;
+  onCalibrationWrongChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const { t } = useLanguage();
+  const copy = t.chat.calibration;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/50 px-4 backdrop-blur-sm">
+      <div
+        aria-modal="true"
+        className="w-full max-w-xl rounded-2xl border border-amber-200 bg-white p-6 shadow-2xl"
+        role="dialog"
+      >
+        <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
+          {copy.eyebrow}
+        </p>
+        <h2 className="mt-2 text-xl font-bold text-gray-950">
+          {copy.title}
+        </h2>
+        <p className="mt-3 text-sm leading-6 text-gray-600">
+          {copy.description}
+        </p>
+        <p className="mt-2 text-xs leading-5 text-amber-700">
+          {copy.consistency(driftResult.consistency_score.toFixed(2))} ·{" "}
+          {driftResult.reason}
+        </p>
+
+        <div className="mt-5 space-y-4">
+          <label className="block">
+            <span className="text-sm font-semibold text-gray-800">
+              {copy.wrongQuestion}
+            </span>
+            <textarea
+              className="mt-2 min-h-28 w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition focus:border-amber-400 focus:ring-4 focus:ring-amber-100"
+              disabled={isCalibrating}
+              onChange={(event) => onCalibrationWrongChange(event.target.value)}
+              value={calibrationWrong}
+            />
+          </label>
+
+          <label className="block">
+            <span className="text-sm font-semibold text-gray-800">
+              {copy.idealQuestion}
+            </span>
+            <textarea
+              className="mt-2 min-h-28 w-full resize-none rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-900 outline-none transition focus:border-amber-400 focus:ring-4 focus:ring-amber-100"
+              disabled={isCalibrating}
+              onChange={(event) => onCalibrationIdealChange(event.target.value)}
+              value={calibrationIdeal}
+            />
+          </label>
+        </div>
+
+        <div className="mt-5 flex justify-end">
+          <button
+            className="rounded-full bg-gray-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={
+              isCalibrating ||
+              !calibrationWrong.trim() ||
+              !calibrationIdeal.trim()
+            }
+            onClick={onSubmit}
+            type="button"
+          >
+            {isCalibrating ? copy.submitting : copy.submit}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ChatBubble({ message }: { message: ChatMessage }) {
   const { t } = useLanguage();
+  const copy = t.chat;
   const isUser = message.role === "user";
 
   return (
@@ -701,6 +1460,24 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         {!isUser && message.modelUsed ? (
           <p className="mt-1 text-[11px] font-medium text-gray-400">
             {message.modelUsed === "deep" ? "DeepSeek V4 Pro" : "DeepSeek Chat"}
+          </p>
+        ) : null}
+        {!isUser && message.experimentMode ? (
+          <p className="mt-1 text-[11px] font-medium text-gray-400">
+            {message.experimentMode === "mode_beta"
+              ? copy.experimentModes.mode_beta
+              : copy.experimentModes.mode_alpha}
+          </p>
+        ) : null}
+        {message.topic ? (
+          <p
+            className={`mt-1 text-[11px] font-medium ${
+              isUser ? "text-gray-300" : "text-gray-400"
+            }`}
+          >
+            {copy.currentTopic}:{" "}
+            {(copy.topics as Record<string, string>)[message.topic] ??
+              message.topic}
           </p>
         ) : null}
         {!isUser && message.warning ? (

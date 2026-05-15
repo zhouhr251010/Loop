@@ -54,6 +54,29 @@ def ensure_sqlite_schema() -> None:
                         "ADD COLUMN branch_id VARCHAR(128) NOT NULL DEFAULT 'main'",
                     ),
                 )
+            if "session_id" not in chat_log_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE chat_logs "
+                        "ADD COLUMN session_id "
+                        "VARCHAR(64) NOT NULL DEFAULT 'default_session'",
+                    ),
+                )
+            if "experiment_mode" not in chat_log_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE chat_logs "
+                        "ADD COLUMN experiment_mode "
+                        "VARCHAR(32) NOT NULL DEFAULT 'mode_alpha'",
+                    ),
+                )
+            if "topic" not in chat_log_columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE chat_logs "
+                        "ADD COLUMN topic VARCHAR(64) NOT NULL DEFAULT 'general'",
+                    ),
+                )
 
         if "event_logs" in table_names:
             connection.execute(

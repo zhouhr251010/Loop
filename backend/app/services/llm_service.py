@@ -229,6 +229,102 @@ def _as_dict(user_data: Any) -> dict[str, Any]:
     }
 
 
+def _extract_json_array(raw_text: str) -> list[Any]:
+    """Extract a JSON array from an LLM response that may include fences."""
+    clean_text = (raw_text or "").strip()
+    fenced_match = re.search(r"```(?:json)?\s*(.*?)```", clean_text, re.DOTALL)
+    if fenced_match:
+        clean_text = fenced_match.group(1).strip()
+
+    try:
+        parsed = json.loads(clean_text)
+    except json.JSONDecodeError:
+        array_match = re.search(r"\[[\s\S]*\]", clean_text)
+        if not array_match:
+            return []
+        try:
+            parsed = json.loads(array_match.group(0))
+        except json.JSONDecodeError:
+            return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _bounded_counterfactual_context(context_text: str, limit: int = 12000) -> str:
+    clean_text = (context_text or "").strip()
+    if len(clean_text) <= limit:
+        return clean_text
+    return f"{clean_text[:limit]}...[truncated]"
+
+
+def suggest_counterfactual_anchors(context_text: str) -> list[dict[str, str]]:
+    """Ask DeepSeek to discover life-decision counterfactual candidates."""
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key or not context_text.strip():
+        return []
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=DEEPSEEK_BASE_URL,
+        timeout=DEFAULT_CHAT_TIMEOUT_SECONDS,
+    )
+    prompt = (
+        "你是一名严谨的心理分析师，正在帮助计算社会科学实验识别"
+        "一个人的人生分岔点。请阅读用户的数字自传、近期聊天和公开帖子，"
+        "提取 3 个最具有反事实意义的关键人生决策点或遗憾时刻。"
+        "优先选择对身份、关系、职业、价值观或长期目标产生持续影响的事件。"
+        "不要编造具体事实；如果上下文证据不足，请用更概括但仍贴合文本的表述。"
+        "只返回 JSON 数组，必须正好 3 个元素。每个元素包含："
+        "context（决策背景）、actual_choice（实际选择）、actual_result（实际结果）。"
+        "每个字段用简体中文，控制在 120 字以内。\n\n"
+        "上下文材料：\n"
+        f"{_bounded_counterfactual_context(context_text)}"
+    )
+
+    try:
+        response = _create_deepseek_chat_completion(
+            client=client,
+            model_name=DEFAULT_CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你只输出合法 JSON，不要输出 markdown、解释或代码块。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            thinking_mode=DEFAULT_CHAT_THINKING_MODE,
+            reasoning_effort=DEFAULT_CHAT_REASONING_EFFORT,
+        )
+    except Exception as exc:
+        _log_llm_fallback("suggest_counterfactual_anchors", exc)
+        return []
+
+    suggestions: list[dict[str, str]] = []
+    for item in _extract_json_array(_chat_completion_content(response)):
+        if not isinstance(item, dict):
+            continue
+        context = str(item.get("context") or "").strip()
+        actual_choice = str(item.get("actual_choice") or "").strip()
+        actual_result = str(item.get("actual_result") or "").strip()
+        if not context or not actual_choice or not actual_result:
+            continue
+        suggestions.append(
+            {
+                "context": context[:2000],
+                "actual_choice": actual_choice[:2000],
+                "actual_result": actual_result[:4000],
+            },
+        )
+        if len(suggestions) >= 3:
+            break
+
+    return suggestions
+
+
 def _build_identity_context(
     user_data: dict[str, Any],
     include_core_memory: bool = True,
@@ -1125,6 +1221,8 @@ def chat_with_agent(
     reconstructed_core_memory: str | None = None,
     recent_history: list[Any] | None = None,
     historical_chat_loader: HistoricalChatLoader | None = None,
+    session_id: str = "default_session",
+    topic: str = "general",
 ) -> tuple[str, int]:
     """Generate a private daily-sync reply through the configured chat engine."""
     user = getattr(agent, "user", None)
@@ -1132,6 +1230,10 @@ def chat_with_agent(
     user_data = _as_dict(user)
     api_key = os.getenv("DEEPSEEK_API_KEY")
     normalized_branch_id = (branch_id or "main").strip() or "main"
+    normalized_session_id = (
+        (session_id or "default_session").strip()[:64] or "default_session"
+    )
+    normalized_topic = (topic or "general").strip()[:64] or "general"
     if not api_key:
         retrieved_memories: list[str] = []
         if user_id is not None:
@@ -1222,7 +1324,10 @@ def chat_with_agent(
 
         from app.services.agent_graph import invoke_agent_graph
 
-        thread_id = f"agent:{getattr(agent, 'id', user_id)}"
+        thread_id = (
+            f"agent:{getattr(agent, 'id', user_id)}"
+            f":session:{normalized_session_id}:topic:{normalized_topic}"
+        )
         if normalized_branch_id != "main":
             thread_id = f"{thread_id}:branch:{normalized_branch_id}"
         response = invoke_agent_graph(
@@ -1253,6 +1358,85 @@ def chat_with_agent(
         return _mock_agent_reply(agent, user_message, retrieved_memories), len(
             retrieved_memories,
         )
+
+
+def _build_static_prompt_system_prompt(agent: Any) -> str:
+    """Build the no-memory baseline prompt for ablation experiments."""
+    user = getattr(agent, "user", None)
+    user_data = _as_dict(user)
+    mbti = user_data.get("mbti_type") or "unknown"
+    big_five = json.dumps(
+        user_data.get("big_five_scores") or {},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return (
+        "你是一个数字分身的静态基线版本，只能依据初始问卷人格摘要回答。"
+        "不要调用工具，不要使用记忆库，不要声称记得过往对话，不要引用用户自传、"
+        "core memory、RAG 片段或任何长期记忆。"
+        f"初始 MBTI: {mbti}. "
+        f"初始 Big Five: {big_five}. "
+        "用简体中文回复当前用户消息，语气自然，但只能体现这些静态人格线索。"
+    )
+
+
+def _static_prompt_fallback_reply(agent: Any, user_message: str) -> str:
+    user = getattr(agent, "user", None)
+    user_data = _as_dict(user)
+    mbti = user_data.get("mbti_type") or "unknown"
+    return (
+        f"我会先按最基础的 {mbti} 人格设定来回应："
+        f"你刚才说“{_truncate_context_text(user_message, 120)}”，"
+        "我倾向于先抓住这句话本身，而不是假装引用任何记忆。"
+    )
+
+
+def chat_with_agent_static_prompt(
+    agent: Any,
+    user_message: str,
+    chat_model: str = CHAT_MODEL_FAST,
+) -> tuple[str, int]:
+    """Generate the static-prompt baseline with RAG/tools/history fully disabled."""
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        return _static_prompt_fallback_reply(agent, user_message), 0
+
+    try:
+        from openai import OpenAI
+
+        (
+            model_name,
+            thinking_mode,
+            reasoning_effort,
+            timeout_seconds,
+            max_tokens,
+        ) = _chat_model_settings(chat_model)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=DEEPSEEK_BASE_URL,
+            timeout=timeout_seconds,
+        )
+        response = _create_deepseek_chat_completion(
+            client=client,
+            model_name=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": _build_static_prompt_system_prompt(agent),
+                },
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens=max_tokens,
+            thinking_mode=thinking_mode,
+            reasoning_effort=reasoning_effort,
+        )
+        generated_text = _chat_completion_content(response)
+        if generated_text:
+            return generated_text, 0
+    except Exception as exc:
+        _log_llm_fallback("chat_with_agent_static_prompt", exc)
+
+    return _static_prompt_fallback_reply(agent, user_message), 0
 
 
 def _stringify_message_content(content: Any) -> str:

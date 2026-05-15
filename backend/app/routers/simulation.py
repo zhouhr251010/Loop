@@ -21,6 +21,8 @@ from app.security import get_current_user
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
+    coerce_timestamp,
+    get_branch_lineage_ids,
     get_global_branch_ids,
     normalize_branch_id,
 )
@@ -57,6 +59,47 @@ def _get_optional_current_user(
         return get_current_user(authorization=authorization, db=db)
     except HTTPException:
         return None
+
+
+def _validate_source_event(
+    db: Session,
+    *,
+    agent_id: int,
+    source_branch_id: str,
+    source_event_id: int | None,
+    rollback_timestamp: Any,
+) -> models.EventLog | None:
+    if source_event_id is None:
+        return None
+
+    source_event = db.get(models.EventLog, source_event_id)
+    if source_event is None or source_event.agent_id != agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source event not found for this agent.",
+        )
+
+    source_lineage = get_branch_lineage_ids(db, source_branch_id)
+    event_branch_id = normalize_branch_id(source_event.branch_id)
+    if event_branch_id not in source_lineage:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Source event is not part of the selected source branch lineage.",
+        )
+
+    source_event_timestamp = coerce_timestamp(source_event.timestamp)
+    requested_timestamp = coerce_timestamp(rollback_timestamp)
+    if (
+        source_event_timestamp is not None
+        and requested_timestamp is not None
+        and source_event_timestamp != requested_timestamp
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Source event timestamp does not match rollback_timestamp.",
+        )
+
+    return source_event
 
 
 @router.get(
@@ -184,16 +227,33 @@ def fork_simulation_timeline(
             detail="Global branch already exists.",
         )
 
+    source_branch_id = normalize_branch_id(fork_in.source_branch_id)
+    if not branch_exists(db, source_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source branch not found.",
+        )
+
+    source_event = _validate_source_event(
+        db,
+        agent_id=fork_in.agent_id,
+        source_branch_id=source_branch_id,
+        source_event_id=fork_in.source_event_id,
+        rollback_timestamp=fork_in.rollback_timestamp,
+    )
+
     time_machine = TimeMachine(db)
     reconstructed_state = time_machine.reconstruct_state(
         agent_id=fork_in.agent_id,
         target_timestamp=fork_in.rollback_timestamp,
-        branch_id="main",
+        branch_id=source_branch_id,
     )
     event_payload = {
         "fork": {
             "scope": "global_world_line",
-            "from_branch_id": DEFAULT_BRANCH_ID,
+            "from_branch_id": source_branch_id,
+            "parent_branch_id": source_branch_id,
+            "parent_event_id": source_event.event_id if source_event else None,
             "rollback_timestamp": fork_in.rollback_timestamp,
             "base_state": reconstructed_state,
             "seed_agent_id": fork_in.agent_id,
@@ -210,7 +270,8 @@ def fork_simulation_timeline(
     )
     logger.info(
         f"[Time Machine] Forked new timeline '{new_branch_name}' from "
-        f"{fork_in.rollback_timestamp}. Injected counterfactual event.",
+        f"{source_branch_id} at {fork_in.rollback_timestamp}. "
+        "Injected counterfactual event.",
     )
 
     return SimulationForkOut(

@@ -95,6 +95,7 @@ class Agent(Base):
     )
     reflection_events = relationship("ReflectionEvent", back_populates="agent")
     event_logs = relationship("EventLog", back_populates="agent")
+    evaluations = relationship("Evaluation", back_populates="agent")
 
 
 class EventLog(Base):
@@ -180,11 +181,40 @@ class ChatLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
     branch_id = Column(String(128), default="main", nullable=False, index=True)
+    session_id = Column(
+        String(64),
+        default="default_session",
+        nullable=False,
+        index=True,
+    )
+    topic = Column(String(64), default="general", nullable=False, index=True)
+    experiment_mode = Column(
+        String(32),
+        default="mode_alpha",
+        nullable=False,
+        index=True,
+    )
     user_message = Column(Text, nullable=False)
     agent_reply = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=utc_now_seconds, nullable=False)
 
     agent = relationship("Agent", back_populates="chat_logs")
+
+
+class Evaluation(Base):
+    """Blind-test authenticity rating from a public evaluator."""
+
+    __tablename__ = "evaluations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    evaluator_relation = Column(String(32), nullable=False)
+    authenticity_score = Column(Integer, nullable=False)
+    qualitative_feedback = Column(Text, nullable=True)
+    sampled_chat_log_ids = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, default=utc_now_seconds, nullable=False, index=True)
+
+    agent = relationship("Agent", back_populates="evaluations")
 
 
 class ReflectionEvent(Base):

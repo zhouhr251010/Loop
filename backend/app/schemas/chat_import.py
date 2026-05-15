@@ -30,6 +30,16 @@ class ImportedChatBatchCreate(BaseModel):
     """Batch payload for target-agent perspective initialization."""
 
     messages: list[ImportedChatMessageCreate] = Field(..., min_length=1, max_length=2000)
+    topic: str | None = Field(default=None, max_length=80)
+
+    @field_validator("topic", mode="before")
+    @classmethod
+    def normalize_topic(cls, value: str | None) -> str | None:
+        """Store an optional batch-level topic label as compact metadata."""
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
 
 class ImportedChatBatchOut(BaseModel):

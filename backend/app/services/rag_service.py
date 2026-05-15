@@ -444,10 +444,12 @@ def add_agent_chat_memories(
     target_agent_id: int,
     messages: list[dict[str, Any]],
     branch_id: str = "main",
+    topic: str | None = None,
 ) -> int:
     """Store group-chat memory from one target agent's private perspective."""
     documents: list[str] = []
     metadatas: list[dict[str, Any]] = []
+    normalized_topic = str(topic or "").strip()
 
     for message in messages:
         sender_agent_id = int(message["sender_agent_id"])
@@ -476,6 +478,8 @@ def add_agent_chat_memories(
             }
             if timestamp:
                 metadata["timestamp"] = timestamp
+            if normalized_topic:
+                metadata["topic"] = normalized_topic
             if speaker == "others":
                 metadata["original_speaker_id"] = sender_agent_id
 

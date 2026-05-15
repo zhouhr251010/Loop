@@ -318,6 +318,7 @@ def import_agent_group_chat(
             target_agent_id=db_agent.id,
             messages=records,
             branch_id="main",
+            topic=chat_import.topic,
         )
     except RuntimeError as exc:
         raise HTTPException(

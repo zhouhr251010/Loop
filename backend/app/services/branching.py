@@ -88,6 +88,24 @@ def branch_exists(db: Session, branch_id: str) -> bool:
     )
 
 
+def get_branch_lineage_ids(
+    db: Session,
+    branch_id: str,
+    visited_branches: set[str] | None = None,
+) -> set[str]:
+    """Return the selected branch plus its parent branch chain."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    visited = set(visited_branches or set())
+    if normalized_branch_id in visited:
+        return visited
+
+    visited.add(normalized_branch_id)
+    anchor = get_branch_anchor(db, normalized_branch_id)
+    if anchor is not None:
+        return get_branch_lineage_ids(db, anchor.parent_branch_id, visited)
+    return visited
+
+
 def get_global_branch_ids(db: Session) -> list[str]:
     """Return all global world-line branch ids currently known."""
     rows = db.query(models.EventLog.branch_id).distinct().all()

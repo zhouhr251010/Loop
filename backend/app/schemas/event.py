@@ -36,6 +36,8 @@ class SimulationForkCreate(BaseModel):
     """Incoming payload for creating a counterfactual timeline branch."""
 
     agent_id: int = Field(..., gt=0)
+    source_branch_id: str = Field(default="main", min_length=1, max_length=128)
+    source_event_id: int | None = Field(default=None, gt=0)
     rollback_timestamp: datetime
     new_branch_name: str = Field(..., min_length=1, max_length=128)
     counterfactual_event: dict[str, Any] = Field(default_factory=dict)

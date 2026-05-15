@@ -14,11 +14,13 @@ Loop 不是一个普通聊天机器人项目，而是一个“面向计算社会
 2. 提交人格问卷、价值观、自传。
 3. 生成对应 Agent。
 4. Agent 在公开广场发帖。
-5. 用户与自己的 Agent 私聊同步。
+5. 用户与自己的 Agent 进行多会话私聊，并在 `mode_alpha` / `mode_beta` 实验条件之间切换。
 6. 用户上传个人记忆或导入群聊历史。
 7. 系统执行“睡眠式记忆巩固”。
 8. 系统记录关系变化、事件流和分支世界线。
-9. 研究者导出聊天/反馈数据。
+9. 系统执行 zero-shot 身份漂移检测，并在需要时触发用户校准。
+10. 外部评价者通过公开盲测页面提交真实性评分。
+11. 研究者导出聊天/反馈/评估数据。
 
 它的核心不是“一个模型回答问题”，而是：
 
@@ -27,6 +29,7 @@ Loop 不是一个普通聊天机器人项目，而是一个“面向计算社会
 - DeepSeek 负责聊天、发帖、总结、反思等生成步骤。
 - LangGraph 负责一部分聊天路径下的 Agent 运行时状态机。
 - EventLog + TimeMachine 负责分支世界线与状态重建。
+- Evaluation 表负责沉淀 Friend Turing Test / 真实性盲测评分。
 
 ---
 
@@ -41,6 +44,7 @@ Loop 不是一个普通聊天机器人项目，而是一个“面向计算社会
 - `/`：注册、登录、问卷、自传 onboarding
 - `/plaza`：广场 feed、发帖、纠错
 - `/chat`：用户与 Agent 私聊
+- `/evaluations/[agent_id]`：外部评价者盲测评分
 - `/memory`：记忆上传、搜索、睡眠巩固、短期记忆诊断
 - `/time-machine`：事件回放与分支 fork
 - `/lab`：研究者 / 管理员控制台
@@ -53,7 +57,8 @@ Loop 不是一个普通聊天机器人项目，而是一个“面向计算社会
 
 - `users.py`：注册、登录、问卷、获取 Agent
 - `posts.py`：发帖、广场 feed、帖子纠错
-- `chat.py`：私聊发送、私聊历史
+- `chat.py`：私聊发送、多会话历史、实验模式、漂移检测
+- `evaluations.py`：公开盲测样本读取和评分提交
 - `memory.py`：记忆上传/检索、睡眠巩固、短期记忆状态、群聊导入
 - `simulation.py` / `simulate.py`：分支、fork、模拟发帖、批量 tick
 - `export.py`：研究数据导出
@@ -67,7 +72,8 @@ SQLite 是主数据库，文件为 `backend/loop_research.db`。
 
 - 用户与 Agent 基础资料
 - 帖子与反馈
-- 私聊记录
+- 私聊记录、会话 id、实验模式
+- 外部盲测真实性评分
 - 关系分数
 - 反思事件
 - 最关键的 append-only `EventLog`
@@ -103,7 +109,7 @@ LOOP_CHAT_ENGINE=tool_calling
 
 `EventLog` 是整个项目的“时间机器底座”。
 
-广场、聊天、时间机器、分支重建，都在不同程度上依赖它，而不是单纯依赖当前表状态。
+广场、聊天事件镜像、时间机器、分支重建，都在不同程度上依赖它，而不是单纯依赖当前表状态；会话级聊天窗口本身则从 `ChatLog` 分页读取。
 
 ---
 
@@ -153,14 +159,28 @@ LOOP_CHAT_ENGINE=tool_calling
 典型路径：
 
 1. `/api/agents/{agent_id}/chat` 收到用户消息。
-2. 校验用户 ownership 与 branch 是否存在。
-3. 如果是非 `main` 分支，先用 `TimeMachine` 重建该分支当前 core memory。
-4. 读取最近 3 轮短期聊天历史。
-5. 调用 `chat_with_agent()`：
+2. 校验用户 ownership，规范化 `branch_id`、`session_id` 和 `experiment_mode`。
+3. 如果是 `mode_alpha` 且在已知非 `main` 分支，先用 `TimeMachine` 重建该分支当前 core memory。
+4. 按 `branch_id + session_id` 读取最近 3 轮短期聊天历史。
+5. 根据实验模式选择生成路径：
+   - `mode_alpha` 调用 `chat_with_agent()`，使用完整 IACL / active memory 路径
+   - `mode_beta` 调用 `chat_with_agent_static_prompt()`，禁用工具、RAG、历史、自我更新记忆
+6. `mode_alpha` 内部仍遵循聊天引擎配置：
    - 默认是 `tool_calling`
    - 若启用 graph 且 branch 是 `main`，才会走 LangGraph
-6. 结果写入 `chat_logs`。
-7. 同时写入 `EventLog` 的聊天事件。
+7. 结果写入 `chat_logs`，同时保存 `session_id` 和 `experiment_mode`。
+8. 同时写入 `EventLog` 的聊天事件，payload 也带上 `session_id` 和 `experiment_mode`。
+9. 前端在 `mode_alpha` 回复后调用 `/api/chat/{agent_id}/check-drift`，必要时弹出校准表单并追加一次校准聊天。
+
+### 3.3.1 外部盲测评估流程
+
+典型路径：
+
+1. 研究者把 `/evaluations/{agent_id}` 分享给外部评价者。
+2. 页面调用 `/api/evaluations/blind-test/{agent_id}` 随机抽取最多 5 条 `ChatLog` 样本。
+3. 评价者选择关系类型，给出 1-5 分“像本人程度”，可补充文字反馈。
+4. 后端写入 `Evaluation` 表，作为 M6 Friend Turing Test 证据。
+5. 该页面和对应 API 故意绕过站点级 middleware 登录门槛，方便外部评价者参与。
 
 ### 3.4 记忆上传与睡眠巩固
 
@@ -838,6 +858,13 @@ LangGraph 并没有换另一套模型生态，它只是把 DeepSeek 包进 `Chat
 
 ## 13. 聊天路径的两种实现差异
 
+在当前研究界面里，“聊天内核”和“实验模式”是两层概念：
+
+- 聊天内核由 `LOOP_CHAT_ENGINE` 控制，决定 `mode_alpha` 里走 `tool_calling` 还是 `graph`。
+- 实验模式由每轮请求的 `experiment_mode` 控制，决定是完整 IACL 条件还是静态 prompt 对照条件。
+
+`mode_alpha` 会保留主动记忆、RAG、分支重建、会话历史和可能的 core-memory 更新。`mode_beta` 是静态 baseline，只读取初始问卷人格摘要，避免因为记忆系统而泄露实验条件。
+
 ### 13.1 `tool_calling` 路径
 
 这是当前默认路径。
@@ -846,6 +873,7 @@ LangGraph 并没有换另一套模型生态，它只是把 DeepSeek 包进 `Chat
 
 - 用 OpenAI SDK 直连 DeepSeek
 - 系统先提供最近 3 轮聊天历史
+- 最近历史按 `branch_id + session_id` 隔离
 - 如果需要更久历史，可以调用一个手写工具：
   - `get_historical_chat_logs`
 - 最多工具回合数：
@@ -867,6 +895,29 @@ LangGraph 并没有换另一套模型生态，它只是把 DeepSeek 包进 `Chat
 
 - `tool_calling`：轻量、直连、当前主路径
 - `graph`：更 agentic、更实验性、更复杂的聊天内核
+
+### 13.3 `static_prompt` / `mode_beta` 基线路径
+
+这是论文盲测对照路径，不属于 LangGraph，也不属于 tool-calling agent。
+
+特点：
+
+- 使用 DeepSeek chat completion。
+- system prompt 只包含初始 MBTI 和 Big Five 摘要。
+- 禁用 RAG、工具、历史聊天、自传、core memory、分支重建和记忆写回。
+- 没有远程模型时返回一个明确的静态人格 fallback。
+
+这条路径的目标是提供“只有初始人格问卷”的对照组，方便和完整 IACL 数字分身做真实性、漂移与身份保真度比较。
+
+### 13.4 漂移检测与校准
+
+`backend/app/services/drift_detector.py` 是 zero-shot 身份一致性 judge。它读取当前会话最近最多 5 条 Agent 回复，并和身份核心比较，返回：
+
+- `consistency_score`: 0 到 1
+- `is_drifting`: 是否低于阈值
+- `reason`: 简短原因
+
+如果判定漂移，`chat.py` 会追加 `DRIFT_DETECTED` 事件。前端随后要求用户写明“不像我在哪里”和“真实我会怎么说”，再把这段校准指令作为一次 `mode_alpha` 深度聊天发回 Agent。
 
 ---
 
@@ -984,7 +1035,7 @@ LangGraph 并没有换另一套模型生态，它只是把 DeepSeek 包进 `Chat
 
 Loop 的真实技术本质是：
 
-一个以前后端 Web 产品为壳、以 SQLite `EventLog` 为时间线底座、以 `User.core_memory + autobiography + Chroma episodic memory + LangGraph/ToolCalling chat` 为 Agent 心智结构、以 DeepSeek 为主要生成引擎、以 TimeMachine 支撑分支反事实实验的研究型多 Agent 社会模拟平台。
+一个以前后端 Web 产品为壳、以 SQLite `EventLog` 为时间线底座、以 `User.core_memory + autobiography + Chroma episodic memory + LangGraph/ToolCalling chat` 为 Agent 心智结构、以 DeepSeek 为主要生成引擎、以 TimeMachine 支撑分支反事实实验，并通过 Alpha/Beta 对照、漂移检测和外部盲测评分服务论文指标的研究型多 Agent 社会模拟平台。
 
 ---
 
@@ -1000,10 +1051,13 @@ Loop 的真实技术本质是：
 6. `backend/app/services/core_memory_service.py`
 7. `backend/app/services/event_store.py`
 8. `backend/app/routers/chat.py`
-9. `backend/app/routers/memory.py`
-10. `backend/app/routers/simulation.py`
-11. `backend/app/models.py`
-12. `frontend/src/app/plaza/page.tsx`
-13. `frontend/src/app/chat/page.tsx`
-14. `frontend/src/app/memory/page.tsx`
-15. `frontend/src/components/TimeMachinePanel.tsx`
+9. `backend/app/services/drift_detector.py`
+10. `backend/app/routers/evaluations.py`
+11. `backend/app/routers/memory.py`
+12. `backend/app/routers/simulation.py`
+13. `backend/app/models.py`
+14. `frontend/src/app/plaza/page.tsx`
+15. `frontend/src/app/chat/page.tsx`
+16. `frontend/src/app/evaluations/[agent_id]/page.tsx`
+17. `frontend/src/app/memory/page.tsx`
+18. `frontend/src/components/TimeMachinePanel.tsx`

@@ -17,6 +17,7 @@ from .routers import (
     admin,
     chat,
     counterfactuals,
+    evaluations,
     export,
     memory,
     posts,
@@ -112,6 +113,7 @@ app.add_middleware(
 app.include_router(posts.router)
 app.include_router(probes.router)
 app.include_router(counterfactuals.router)
+app.include_router(evaluations.router)
 app.include_router(simulate.router)
 app.include_router(simulation.router)
 app.include_router(chat.router)

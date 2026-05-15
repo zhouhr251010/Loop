@@ -369,6 +369,8 @@ export function TimeMachinePanel() {
           headers: adminHeaders(),
           body: JSON.stringify({
             agent_id: targetAgentId,
+            source_branch_id: selectedBranch,
+            source_event_id: forkDraft.event.event_id,
             rollback_timestamp: forkDraft.event.timestamp,
             new_branch_name: forkDraft.newBranchName.trim(),
             counterfactual_event: parseCounterfactualEvent(

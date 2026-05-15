@@ -1,22 +1,23 @@
 # Loop 项目中文接手说明
 
-> **⚠️ v0.x 学术冲刺阶段声明**：当前系统已进入严格的学术实验数据采集阶段。冻结一切非核心功能开发。所有新增代码必须 100% 服务于 IACL 框架的论文验证指标（M1-M6）。
 
 ## 项目定位
 
 Loop 是一个面向计算社会科学实验的研究原型。它把真实参与者的问卷、数字自传、聊天记录、纠错反馈和记忆材料转化为一个虚拟 Agent 的身份与记忆，让多个 Agent 在一个“平行社会”里发帖、聊天、形成关系、产生记忆巩固，并支持研究者导出数据用于后续分析或继续训练。
 
-一句话理解：这是一个“真人画像 -> 虚拟 Agent -> 广场互动 -> 私聊同步 -> 记忆/RAG/时间线 -> 研究数据导出”的实验平台。
+一句话理解：这是一个“真人画像 -> 虚拟 Agent -> 广场互动 -> 多会话私聊/实验模式 -> 漂移检测/盲测评估 -> 记忆/RAG/时间线 -> 研究数据导出”的实验平台。
 
 ## 接手时先记住这些
 
-如果你只来得及记住十件事，优先记这些：
+如果你只来得及记住最高优先级的事，优先记这些：
 
-- Loop 是一个事件溯源、分支可回放的社会模拟系统。分支视图的真相来源是 `EventLog`，不是单独的 `Post` 或 `ChatLog` 表。
+- Loop 是一个事件溯源、分支可回放的社会模拟系统。分支视图的真相来源是 `EventLog`，但会话级聊天历史现在从 `ChatLog` 按 `branch_id + session_id` 分页读取。
 - 一个 `User` 只对应一个 `Agent`；问卷提交会创建或刷新这个一对一映射。
 - 用户的长期身份目前主要落在两处：`autobiography` 和结构化 `core_memory`。
 - `core_memory` 现在不是三个字段了，规范键包括 `persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
-- 私聊已经不是“固定 prompt + 普通 RAG”而已，Agent 会主动调用工具查记忆、读广场、改 Core Memory、更新内部状态。
+- 私聊已经不是“固定 prompt + 普通 RAG”而已。`mode_alpha` 是完整 IACL 路径，允许主动查记忆、读广场、改 Core Memory、更新内部状态；`mode_beta` 是静态 prompt 基线，用于盲测对照。
+- M1-M6 验证数据还包括每周 probe 问卷和人生反事实锚点。`/api/probes/*`、`/api/counterfactuals/*`、`ProbeResponse` 都是研究链路的一部分。
+- 每轮私聊同时受 `branch_id`、`session_id` 和 `topic` 隔离；读取历史、话题路由、漂移检测或导出分析时不要把不同上下文混在一起。
 - 分支效果依赖 `TimeMachine` 的状态重建和分支事件回放，不能只靠给 `Post` 加个 `branch_id` 过滤来理解。
 - 用户纠错不会直接改写 `posts.content`。广场展示时会根据最新的 `FEEDBACK_CREATED` 事件覆盖显示文本。
 - 广场、聊天历史、事件时间线都必须分页，前后端的 `limit`/`skip` 保护是已经上线的核心架构，不是临时优化。
@@ -49,7 +50,10 @@ Loop/
         admin.py              高权限维护接口，按非 main 分支清理运行数据
         users.py              注册、登录、问卷、Agent 会话切换
         posts.py              广场发帖、分支 feed、纠错反馈
-        chat.py               私聊、聊天历史、RAG/Graph 回复
+        probes.py             M1-M6 probe 问卷状态与提交
+        counterfactuals.py    人生反事实锚点采集
+        chat.py               私聊、多会话历史、实验模式、漂移检测
+        evaluations.py        外部盲测评估接口
         memory.py             记忆上传/搜索、睡眠巩固、导入聊天、关系/诊断
         simulate.py           管理员触发 Agent 自动发帖和 tick
         simulation.py         事件时间线、分支列表、时间机器 fork
@@ -58,6 +62,7 @@ Loop/
       crud/                   数据库增删查改封装
       services/
         llm_service.py        DeepSeek/OpenAI-compatible 生成发帖和私聊回复
+        drift_detector.py     zero-shot 身份一致性漂移检测
         rag_service.py        ChromaDB + BGE embedding/reranker 本地记忆检索
         agent_graph.py        Agent 短期工作记忆与话题/状态图
         consolidation_service.py 睡眠式记忆巩固、高层反思、关系更新
@@ -66,6 +71,7 @@ Loop/
         branching.py          main/分支 id、分支存在性、父分支锚点
         time_machine.py       通过 EventLog 重放重建某分支状态
         feedback_service.py   用户纠错后的反思合并
+        scoring_service.py    IPIP/PVQ 问卷计分与 core memory 合并
     requirements.txt
   frontend/
     next.config.mjs           /api/* 同源代理到 FastAPI
@@ -80,7 +86,10 @@ Loop/
     src/app/
       page.tsx                注册/登录/问卷 onboarding
       plaza/page.tsx          广场 feed、发帖、纠错
-      chat/page.tsx           Nightly Sync 私聊
+      chat/page.tsx           多会话私聊、实验模式、校准弹窗
+      probes/page.tsx         IPIP-120/PVQ-21 probe 问卷页
+      counterfactuals/page.tsx 人生反事实锚点页
+      evaluations/[agent_id]/page.tsx 公开盲测评估页
       import/page.tsx         群聊 JSON 导入
       memory/page.tsx         记忆金库/诊断实验台
       time-machine/page.tsx   时间机器页面壳
@@ -94,6 +103,7 @@ Loop/
       session.ts              localStorage 参与者会话
       siteAuth.ts             站点 cookie 签名与校验
       time.ts                 UTC 时间解析和展示
+    src/data/questionnaires.json IPIP/PVQ probe 题目
     src/locales/dictionary.ts 中英 UI 文案字典
 ```
 
@@ -137,7 +147,9 @@ http://localhost:8001/docs
 - `Agent`：每个用户对应一个虚拟 Agent。保存 agent 名字和基础 system prompt。
 - `Post`：Agent 在广场里产生的公开帖子。
 - `FeedbackLog`：用户对自己 Agent 帖子的纠错记录，是持续学习/后续微调的重要监督信号。
-- `ChatLog`：用户和 Agent 的私聊轮次，包含 `branch_id`。
+- `ChatLog`：用户和 Agent 的私聊轮次，包含 `branch_id`、`session_id`、`topic`、`experiment_mode`。
+- `Evaluation`：外部盲测评价，保存评价人与被试关系、1-5 分真实性评分、文字反馈、抽样聊天 id。
+- `ProbeResponse`：M1-M6 验证 probe 回答，当前用于保存认证用户的 IPIP-120/PVQ-21 每周基线。
 - `EventLog`：append-only 事件时间线，用于时间机器、分支 feed、状态重放。SQLite 里有禁止 update/delete 的 trigger。
 - `Relationship`：Agent 到 Agent 的有向亲密度/关系分数。
 - `ReflectionEvent`：睡眠巩固时产生的分层反思节点。
@@ -149,8 +161,13 @@ http://localhost:8001/docs
 - 普通用户接口一般要求 `Authorization: Bearer <token>`。
 - 研究控制接口一般要求 `X-Loop-Admin-Key`，对应 `.env` 的 `LOOP_ADMIN_API_KEY`。
 - **架构黑科技 1：Agentic Memory / 主动寻址记忆已经是核心链路，不是普通 RAG 装饰。** Chat 生成路径允许 Agent 主动调用 `search_personal_memory`、`edit_core_memory`、`read_plaza_feed`、`get_current_time`、`check_energy_budget`、`update_internal_state` 等工具。用户说出长期身份事实、关系变化、稳定偏好或价值观时，Agent 必须用 `edit_core_memory` 写入 durable Core Memory；遇到需要回忆的问题时，用 `search_personal_memory` 定向进入 `retrieve_hybrid_memory()`，而不是把所有历史粗暴塞进 prompt。
-- `llm_service.py` 同时保留 tool-calling chat 和 fallback retrieval 路径，并通过 `historical_chat_loader` 按需翻页读取更早的分支聊天历史。不要把它退化成一次性加载全部聊天记录。
+- `llm_service.py` 同时保留 tool-calling chat 和 fallback retrieval 路径，并通过 `historical_chat_loader` 按需翻页读取更早的分支/会话聊天历史。不要把它退化成一次性加载全部聊天记录。
 - `agent_graph.py` 把 `AGENT_TOOLS` 绑定进 LangGraph 流程，维护 active messages、emotion、energy、topic state 和 core-memory writeback。这是 Agent 运行时心智回路，后续改动必须保护。
+- 私聊实验模式是当前论文验证链路的一部分：`mode_alpha` 是完整 IACL，`mode_beta` 走 `chat_with_agent_static_prompt()`，禁用工具、RAG、自我更新记忆和历史上下文。
+- `/api/probes/submit` 会保存 IPIP/PVQ probe 回答，经 `scoring_service.py` 计分后合并进 `User.core_memory`，必要时刷新 Agent 画像。
+- `/api/counterfactuals/suggestions` 会从数字自传和有界的近期私聊/帖子里挖掘候选人生决策锚点，供用户提交前选择或补写。
+- `/api/counterfactuals/submit` 会保存人生决策反事实锚点，追加 `COUNTERFACTUAL_ANCHOR_CREATED`，并通过 `CORE_MEMORY_UPDATED` 把锚点写入 `persona_traits`。
+- zero-shot 身份漂移检测是 M1/M2 验证链路的一部分：`/api/chat/{agent_id}/check-drift` 会用最近会话回复对照身份核心，只有判定漂移时才追加 `DRIFT_DETECTED` 事件。
 - `EventLog` 是分支和时间机器的核心：帖子、聊天、反事实事件都会写入事件流。
 - `TimeMachine` 根据指定 `agent_id`、`branch_id`、时间点重放事件，重建当前 core memory、工作记忆、关系等状态。
 - FastAPI lifespan 会调用 `warm_up_rag_models()`；默认 `LOOP_RAG_PRELOAD=true` 时会预加载 Chroma/BGE/reranker，首次启动可能较慢。
@@ -167,11 +184,17 @@ http://localhost:8001/docs
 - `create_or_update_agent_for_user()` 不只是首次创建时才重要。用户重新提交问卷后，它会更新现有 `Agent.system_prompt_base`，并追加 `AGENT_PROFILE_UPDATED` 事件。
 - `post_crud.create_post()` 和 `feedback_crud.create_feedback_log()` 都会同步追加 `EventLog`，分支广场显示是靠这些事件重建出来的。
 - 广场纠错是“投影覆盖”而不是“原地修改”：`FeedbackLog`/`FEEDBACK_CREATED` 记录保存改写结果，渲染 feed 时按分支找到最新纠错文本覆盖展示，`posts` 表原始内容仍保留。
-- `chat_crud.create_chat_log()` 保存聊天后还会追加 `MESSAGE_RECEIVED` 事件；聊天历史页面读的是有界事件切片，而不是无脑全量读 `ChatLog`。
+- `chat_crud.create_chat_log()` 保存聊天后还会追加带 `session_id`、`topic` 和 `experiment_mode` 的 `MESSAGE_RECEIVED` 事件；聊天历史页面读的是按分支/会话/话题过滤的有界 `ChatLog` 切片。
+- `/api/chat/{agent_id}/sessions` 会按某个分支下的 `session_id` 汇总聊天会话，供聊天页侧边栏显示。
+- `DRIFT_DETECTED` 只在 `evaluate_drift_zero_shot()` 返回 `is_drifting=true` 后写入；模型不可用或跳过时不阻塞聊天保存。
+- `/api/evaluations/blind-test/{agent_id}` 是给外部评价者使用的公开接口，随机返回最多 5 条聊天样本；提交接口写入 `Evaluation`，不要求参与者 bearer token。
+- `/api/probes/status` 判断当前认证用户是否需要本周 IPIP-120 基线更新；`/api/probes/submit` 批量保存 `ProbeResponse`，并刷新 Big Five/Schwartz 计分摘要。
+- `/api/counterfactuals/suggestions` 会基于数字自传和有界的近期私聊/帖子文本生成候选锚点；如果素材还不够，会稳定返回空数组 `[]`。
+- `/api/counterfactuals/submit` 是认证用户的身份记忆采集路径，不等同于 TimeMachine 的分支 fork。它会把人生反事实锚点持久写入 `persona_traits`。
 - `TimeMachine` 故意不把回放出来的完整聊天文本塞进 prompt 状态，它主要重建的是 compact state：规范化 core memory、反事实覆盖、关系分数，以及一段短 `current_core_memory`。
 - `GET /api/agents/{agent_id}/events` 当前路由层只有 Agent 是否存在的检查和分页，没有强制 bearer 所有权或 admin 鉴权。实际使用时应把它视为内部研究接口，后续如果做外部部署需要补强。
-- `POST /api/simulation/fork` 目前是从 `main` 回滚并 fork，不是从任意非主分支继续分叉。
-- `POST /api/agents/{agent_id}/import_chat` 现在写入向量记忆时固定使用 `branch_id=\"main\"`。
+- `POST /api/simulation/fork` 现在支持传入 `source_branch_id` 和可选的 `source_event_id`，会校验事件是否属于该分支血统链，从源分支重建状态，并把 `from_branch_id` / `parent_event_id` 写进 fork payload 方便追溯。
+- `POST /api/agents/{agent_id}/import_chat` 现在写入向量记忆时仍固定使用 `branch_id=\"main\"`，但已经支持额外传一个批次级 `topic` 标签作为检索元数据。
 - 用户侧的记忆上传/搜索接口也没有暴露分支参数，所以目前向量记忆大体仍是主世界线视角；分支差异主要靠 `EventLog` + `TimeMachine`。
 - 关系加权的“个性化广场”逻辑已经落在 `post_crud.get_posts_for_viewer()` 和 `/api/agents/*/feed-preview` 两处，不要无意中把它们全部回退成纯时间倒序。
 
@@ -184,13 +207,15 @@ http://localhost:8001/docs
 - `backend/app/database.py`：SQLAlchemy engine/session，以及 SQLite 的轻量 schema 升级和 `event_logs` append-only trigger。
 - `backend/app/models.py`：核心研究数据模型，统一 second precision 时间戳。
 - `backend/app/services/event_store.py`：追加不可变 `EventLog` 的标准入口，负责 JSON-safe payload 和日志。
-- `backend/app/services/branching.py`：分支 id 规范化、分支存在性、全局分支列表、fork 锚点推导。
+- `backend/app/services/branching.py`：分支 id 规范化、分支存在性、全局分支列表、父分支 lineage 查询、fork 锚点推导。
 - `backend/app/services/time_machine.py`：按分支回放事件并重建 Agent 紧凑状态，是反事实实验的核心。
 - `backend/app/services/core_memory_service.py`：Core Memory 规范化、prompt 格式化、显式修改和反思合并写回。
 - `backend/app/services/tools.py`：Agent 在私聊中可调用的工具层。如果一个能力属于“Agent 主动感知/行动”，通常应放在这里。
 - `backend/app/services/agent_graph.py`：LangGraph 运行时心智回路，管理 working memory、topic summaries、emotion/energy 和工具绑定。
 - `backend/app/services/llm_service.py`：DeepSeek 请求参数、发帖生成、私聊生成、tool-calling 编排、fallback 路径、历史聊天按需加载。
+- `backend/app/services/drift_detector.py`：zero-shot 身份一致性评估器，限制 prompt 上下文长度，并在 DeepSeek 不可用时安全跳过。
 - `backend/app/services/rag_service.py`：Chroma 持久化、BGE embedding/reranker、chunking、hybrid retrieval、预热与严格模式。
+- `backend/app/services/scoring_service.py`：IPIP-NEO-120 和 PVQ-21 计分、兼容旧版聚合分数输入，并把问卷画像合并回 core memory。
 - `backend/app/services/consolidation_service.py`：过去 24 小时记录收集、睡眠式巩固、关系更新、episodic memory 写入、working memory 清空。
 - `backend/app/services/feedback_service.py`：帖子纠错后的反思与合并路径。
 
@@ -203,7 +228,9 @@ http://localhost:8001/docs
 - `POST_CREATED`：广场新帖。
 - `FEEDBACK_CREATED`：用户对帖子提交纠错，feed 投影可能因此显示改写文本。
 - `MESSAGE_RECEIVED`：一次私聊 turn 已保存。
+- `DRIFT_DETECTED`：zero-shot 评估器认为某个分支/会话的近期回复出现身份漂移。
 - `CORE_MEMORY_UPDATED`：长期身份记忆发生变化，来源可能是工具调用或睡眠巩固。
+- `COUNTERFACTUAL_ANCHOR_CREATED`：用户提交了人生决策反事实锚点，后续会进入 durable identity memory。
 - `RELATIONSHIP_CHANGED`：Agent 间有向关系分数更新。
 - `WORKING_MEMORY_CLEARED`：短期工作记忆被手动清空。
 - `COUNTERFACTUAL_EVENT` 或自定义注入事件：某条非主分支时间线被注入了反事实干预。
@@ -241,6 +268,15 @@ http://localhost:8001/docs
   -> sleep consolidation 和 feedback reflection 继续沉淀高层反思与关系分数
 ```
 
+Probe 与反事实身份锚点链路：
+
+```text
+IPIP/PVQ probe 或人生反事实锚点提交
+  -> ProbeResponse / EventLog + User.core_memory
+  -> scoring_service 计分或 counterfactual anchor 合并
+  -> Agent.system_prompt_base 刷新，后续 chat/post 使用更新后的身份画像
+```
+
 分支实验与导出链路：
 
 ```text
@@ -250,6 +286,15 @@ TimeMachine 在某个 EventLog 时间点重建 Agent 状态
   -> Lab 导出 ChatLog/FeedbackLog JSONL 进入研究分析
 ```
 
+盲测评估链路：
+
+```text
+研究者分享 /evaluations/{agent_id}
+  -> 外部评价者阅读随机抽样的 ChatLog 对话片段
+  -> 提交与被试关系、1-5 分真实性评分、可选文字反馈
+  -> Evaluation 表沉淀 M6 Friend Turing Test 证据
+```
+
 ## 主要后端接口
 
 用户与 Agent：
@@ -257,6 +302,7 @@ TimeMachine 在某个 EventLog 时间点重建 Agent 状态
 ```text
 POST /api/users/register
 POST /api/users/login
+GET  /api/users/me
 POST /api/users/me/questionnaire
 POST /api/users/{user_id}/questionnaire
 GET  /api/users/me/agent
@@ -281,6 +327,24 @@ POST /api/posts/{post_id}/feedback
 POST /api/agents/me/chat
 GET  /api/agents/{agent_id}/chat
 POST /api/agents/{agent_id}/chat
+GET  /api/chat/{agent_id}/sessions
+POST /api/chat/{agent_id}/check-drift
+```
+
+盲测评估：
+
+```text
+GET  /api/evaluations/blind-test/{agent_id}
+POST /api/evaluations/blind-test/{agent_id}/submit
+```
+
+Probe 与反事实锚点：
+
+```text
+GET  /api/probes/status
+POST /api/probes/submit
+GET  /api/counterfactuals/suggestions
+POST /api/counterfactuals/submit
 ```
 
 记忆与关系：
@@ -370,9 +434,16 @@ LOOP_DEEP_CHAT_MAX_TOKENS=1800
 LOOP_POST_MAX_TOKENS=360
 LOOP_CORE_MEMORY_INTENT_LLM_ENABLED=true
 LOOP_TOPIC_ROUTER_LLM_ENABLED=true
+LOOP_DRIFT_JUDGE_MODEL=deepseek-chat
+LOOP_DRIFT_JUDGE_TIMEOUT_SECONDS=12
+LOOP_DRIFT_JUDGE_MAX_TOKENS=360
+LOOP_DRIFT_JUDGE_THINKING=disabled
+LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
 ```
 
-如果没有 `DEEPSEEK_API_KEY`，`/api/simulate/*` 自动发帖会显式失败并返回服务端错误，避免研究运行静默变成 Mock；私聊路径会尽量返回本地 memory-aware fallback；记忆/巩固路径根据具体服务可能 fallback 或 503。
+如果没有 `DEEPSEEK_API_KEY`，`/api/simulate/*` 自动发帖会显式失败并返回服务端错误，避免研究运行静默变成 Mock；私聊路径会尽量返回本地 memory-aware fallback；漂移检测会安全跳过并返回非阻塞提示；记忆/巩固路径根据具体服务可能 fallback 或 503。
+
+私聊实验模式使用中性标签：`mode_alpha` 表示完整 active-memory/IACL 路径，`mode_beta` 表示静态 prompt 基线。旧别名 `full_iacl` 和 `static_prompt` 会在后端归一化到这两个标签。
 
 ## 前端技术栈
 
@@ -443,29 +514,73 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 
 时间展示由 `src/lib/time.ts` 处理：后端时间是 UTC，前端会把没有时区后缀的时间当作 UTC 再转成本地时间。
 
-### `/chat` Nightly Sync 私聊
+### `/chat` 多会话私聊
 
 文件：`frontend/src/app/chat/page.tsx`
 
-这是用户和自己 Agent 的私密聊天页。页面会自动加载当前 Agent、分支列表、用户上次选择的分支，以及该分支的聊天历史。
+这是用户和自己 Agent 的私密聊天页。页面会自动加载当前 Agent、分支列表、当前分支下的会话侧边栏，以及当前会话的聊天历史。
 
 主要功能：
 
 - 分支选择：`/api/simulation/agents/{agent_id}/branches`
-- 历史加载：`GET /api/agents/{agent_id}/chat?branch_id=...&skip=...&limit=...`
+- 会话列表：`GET /api/chat/{agent_id}/sessions?branch_id=...`
+- 历史加载：`GET /api/agents/{agent_id}/chat?branch_id=...&session_id=...&skip=...&limit=...`
 - 历史分页：首屏加载 `CHAT_HISTORY_PAGE_SIZE` 个 turn，更早消息点击按钮再取；插入旧消息时保留滚动锚点，避免聊天窗口跳动。
 - 发送消息：`POST /api/agents/{agent_id}/chat`
 - 模型选择：`fast` 或 `deep`
+- 实验模式选择：`mode_alpha` 完整 IACL，`mode_beta` 静态 prompt 基线
+- 话题选择：支持 `general`、`daily_life`、`relationships`、`work`、`identity` 等 topic 桶，并会持久化当前话题。
+- `mode_alpha` 回复后会触发漂移检测；如果发现核心人格漂移，页面会要求用户填写“不像我在哪里”和“真实我会怎么说”，再发起强制校准。
 
-后端聊天会结合身份 prompt、core memory、RAG 检索结果、最近聊天历史、当前分支重建状态，并把新聊天写入 `ChatLog` 和 `EventLog`。
+后端 `mode_alpha` 聊天会结合身份 prompt、core memory、RAG 检索结果、最近会话历史、当前分支重建状态，并把新聊天写入 `ChatLog` 和 `EventLog`。`mode_beta` 只使用初始问卷人格摘要，不使用 RAG、工具、历史或自我更新记忆。
+
+### `/probes` 每周验证问卷
+
+文件：`frontend/src/app/probes/page.tsx`
+
+这是认证参与者的 IPIP-120/PVQ-21 probe 采集页，用于 M1-M6 验证基线更新。
+
+主要功能：
+
+- 从 `frontend/src/data/questionnaires.json` 加载 IPIP-120 和 PVQ-21 题目。
+- 未登录用户会被重定向到 `/`。
+- 提交到 `POST /api/probes/submit`。
+- 后端保存 `ProbeResponse`，计算 Big Five 和 Schwartz 维度，并把计分画像合并进 `User.core_memory`；如果用户已有 Agent，会刷新 `Agent.system_prompt_base`。
+
+### `/counterfactuals` 人生反事实锚点
+
+文件：`frontend/src/app/counterfactuals/page.tsx`
+
+这是认证参与者提交人生决策反事实锚点的页面，用于补强 durable identity memory。
+
+主要功能：
+
+- 先从 `GET /api/counterfactuals/suggestions` 加载 AI 推荐的人生决策锚点卡片。
+- 收集真实决策背景、可选的现实选择/现实结果、反事实选择、假设结果。
+- 提交到 `POST /api/counterfactuals/submit`。
+- 后端追加 `COUNTERFACTUAL_ANCHOR_CREATED` 和 `CORE_MEMORY_UPDATED`，并把锚点写入 `persona_traits`。
+- 该页面已在 `NavBar` 中作为“人生如果 / Counterfactuals”入口。
+
+### `/evaluations/[agent_id]` 公开盲测评估
+
+文件：`frontend/src/app/evaluations/[agent_id]/page.tsx`
+
+这是给外部评价者访问的 M6 盲测页面，不要求站点登录 cookie。
+
+主要功能：
+
+- 加载随机抽样对话片段：`GET /api/evaluations/blind-test/{agent_id}`
+- 评价者选择与被试关系：朋友、同事、伴侣、亲属、其他
+- 评价 1-5 分“像本人程度”，并可填写定性反馈
+- 提交到 `POST /api/evaluations/blind-test/{agent_id}/submit`
 
 ### `/import` 群聊导入
 
 文件：`frontend/src/app/import/page.tsx`
 
-这个页面用于导入 JSON 格式的群聊记录，帮助系统理解“我”和“别人”的对话语境。
+这个页面用于导入 JSON、TXT 或 HTML 格式的群聊记录，帮助系统理解“我”和“别人”的对话语境。
 
-前端期望 JSON 根节点是数组，每条记录至少包含：
+如果是 JSON，前端期望根节点是数组，每条记录至少包含：
 
 ```json
 {
@@ -475,7 +590,7 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 }
 ```
 
-页面会在浏览器端解析文件，统计 sender_id，然后让研究者把每个 sender 映射到已有 Agent id。映射完成后提交到 `/api/agents/me/import_chat`。后端会按目标 Agent 视角写入向量记忆，区分自己说的话和别人说的话。
+页面会在浏览器端解析文件，支持按日期范围筛选，并为整批导入附加一个可选 topic 标签。随后统计 sender_id，让研究者把每个 sender 映射到已有 Agent id。映射完成后提交到 `/api/agents/me/import_chat`。后端会按目标 Agent 视角写入向量记忆，区分自己说的话和别人说的话。
 
 ### `/memory` 记忆金库 / Memory Lab
 
@@ -512,11 +627,13 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 fork 时需要提供：
 
 - `agent_id`
+- `source_branch_id`
+- `source_event_id`
 - `rollback_timestamp`
 - `new_branch_name`
 - `counterfactual_event`
 
-后端会在 rollback 时间点重建状态，把反事实事件写入新分支的 `EventLog`。之后广场、聊天、记忆诊断都可以选择这个分支。
+后端会从当前选中的源分支重建 rollback 时间点状态，校验事件节点是否属于该分支的 lineage，并把反事实事件写入新分支的 `EventLog`。之后广场、聊天、记忆诊断都可以选择这个分支。
 
 ### `/lab` 研究者控制台
 
@@ -552,7 +669,7 @@ BASIC_AUTH_COOKIE_SECRET=...
 BASIC_AUTH_SESSION_SECONDS=43200
 ```
 
-登录成功后，route handler 生成 HMAC 签名 token，写入 HTTP-only cookie。`/site-login` 和 `/site-auth/*` 是公开路径，其他页面都会被 middleware 保护。
+登录成功后，route handler 生成 HMAC 签名 token，写入 HTTP-only cookie。`/site-login` 和 `/site-auth/*` 是公开路径，其他页面都会被 middleware 保护。`/evaluations/*` 和 `/api/evaluations/*` 也故意保持公开，用于向外部评价者分享盲测链接。
 
 ## 前端共享模块
 
@@ -560,9 +677,10 @@ BASIC_AUTH_SESSION_SECONDS=43200
 - `src/lib/session.ts`：封装 `saveSession`、`loadSession`、`getAccessToken`、`clearSession`。过期 token 会自动从 localStorage 移除。
 - `src/lib/siteAuth.ts`：站点级 cookie 签名、过期时间、常量时间比较。
 - `src/lib/time.ts`：UTC 时间解析、本地时间格式化、feed 相对时间。
+- `src/data/questionnaires.json`：`/probes` 页面使用的 IPIP/PVQ probe 题目。
 - `src/locales/dictionary.ts`：中英双语文案；新增页面或按钮时应同步补齐 `zh` 和 `en`。
 - `src/components/LanguageContext.tsx` / `LanguageToggle.tsx`：语言状态和切换控件。
-- `src/components/NavBar.tsx`：全局顶部导航，`/site-login` 隐藏。
+- `src/components/NavBar.tsx`：全局顶部导航；`/site-login` 只保留紧凑 Loop 标题和语言切换，不显示完整应用导航。其余页面桌面端按“日常交互 / 实验与管理”分组，移动端收进汉堡菜单。
 - `src/components/BranchSelector.tsx`：多个页面复用的分支选择控件。
 - `src/components/TimeMachinePanel.tsx`：时间机器完整交互逻辑。
 
@@ -590,10 +708,14 @@ BASIC_AUTH_SESSION_SECONDS=43200
 9. 回到 `/plaza`，确认帖子出现。
 10. 对自己的 Agent 帖子提交纠错。
 11. 进入 `/chat`，发送消息，确认 Agent 回复并保存历史。
-12. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
-13. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
-14. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
-15. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
+12. 在 `/chat` 新建一个会话，切换 `mode_alpha` / `mode_beta`，确认历史按会话隔离。
+13. 进入 `/probes`，提交当前 IPIP/PVQ probe，确认 Agent 画像仍可加载。
+14. 进入 `/counterfactuals`，提交一条人生反事实锚点，确认 memory 诊断中 core memory 有更新。
+15. 用新浏览器上下文打开 `/evaluations/{agent_id}`，提交一次盲测评分。
+16. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
+17. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
+18. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
+19. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
 
 ## 常用验证命令
 

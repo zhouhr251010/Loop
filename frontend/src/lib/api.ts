@@ -43,13 +43,29 @@ export type ChatReply = {
   model_used: "fast" | "deep";
   stored: boolean;
   warning?: string | null;
+  query_route?: string;
+  memory_diagnostics?: Array<{
+    kind: "identity" | "semantic" | "episodic";
+    summary: string;
+  }>;
   chat_log: {
     id: number;
     agent_id: number;
     user_message: string;
     agent_reply: string;
     timestamp: string;
+    branch_id?: string;
+    session_id?: string;
+    topic?: string;
+    experiment_mode?: "mode_alpha" | "mode_beta";
   } | null;
+};
+
+export type DriftCheckResponse = {
+  consistency_score: number;
+  drift_probability: number;
+  is_drifting: boolean;
+  reason: string;
 };
 
 export type MemoryUploadResponse = {
@@ -61,6 +77,11 @@ export type ImportedChatMessage = {
   sender_agent_id: number;
   content: string;
   timestamp?: string | null;
+};
+
+export type ImportedChatBatch = {
+  messages: ImportedChatMessage[];
+  topic?: string | null;
 };
 
 export type ChatImportResponse = {

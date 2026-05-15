@@ -5,7 +5,12 @@ import {
   SITE_AUTH_COOKIE_NAME,
 } from "./lib/siteAuth";
 
-const PUBLIC_PATH_PREFIXES = ["/site-login", "/site-auth"];
+const PUBLIC_PATH_PREFIXES = [
+  "/site-login",
+  "/site-auth",
+  "/evaluations",
+  "/api/evaluations",
+];
 
 function isPublicPath(pathname: string) {
   return PUBLIC_PATH_PREFIXES.some(
