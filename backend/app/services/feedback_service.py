@@ -13,6 +13,7 @@ from app.models import utc_now_seconds
 from app.services.branching import normalize_branch_id
 from app.services.core_memory_service import normalize_core_memory
 from app.services.event_store import append_event
+from app.services.llm_service import build_async_deepseek_client
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -65,21 +66,18 @@ def _fallback_feedback_rule(original_text: str, corrected_text: str) -> str:
     return "用户偏好采用自己修订后的语气和措辞，避免原句中不符合其自我表达习惯的风格"
 
 
-def reflect_feedback_rule(original_text: str, corrected_text: str) -> str:
+async def reflect_feedback_rule(original_text: str, corrected_text: str) -> str:
     """Infer one concise communication-style rule from a user's post correction."""
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         return _fallback_feedback_rule(original_text, corrected_text)
 
+    async_client = build_async_deepseek_client(
+        api_key=api_key,
+        timeout_seconds=FEEDBACK_REFLECTION_TIMEOUT_SECONDS,
+    )
     try:
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=DEEPSEEK_BASE_URL,
-            timeout=FEEDBACK_REFLECTION_TIMEOUT_SECONDS,
-        )
-        response = client.chat.completions.create(
+        response = await async_client.chat.completions.create(
             model=DEFAULT_FEEDBACK_MODEL,
             messages=[
                 {
@@ -107,6 +105,8 @@ def reflect_feedback_rule(original_text: str, corrected_text: str) -> str:
         return rule or _fallback_feedback_rule(original_text, corrected_text)
     except Exception:
         return _fallback_feedback_rule(original_text, corrected_text)
+    finally:
+        await async_client.close()
 
 
 def append_feedback_rule_to_core_memory(
@@ -178,7 +178,7 @@ def append_feedback_rule_to_core_memory(
     return core_memory
 
 
-def reflect_and_merge_feedback(
+async def reflect_and_merge_feedback(
     db: Session,
     *,
     feedback_log: models.FeedbackLog,
@@ -186,7 +186,7 @@ def reflect_and_merge_feedback(
     branch_id: str,
 ) -> str:
     """Turn a stored correction into durable in-context communication memory."""
-    rule = reflect_feedback_rule(
+    rule = await reflect_feedback_rule(
         feedback_log.original_text,
         feedback_log.corrected_text,
     )

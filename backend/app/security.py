@@ -6,10 +6,10 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
-from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -22,12 +22,24 @@ from app import models
 from app.crud import user as user_crud
 from app.database import get_db
 
+try:
+    from redis.asyncio import Redis
+    from redis.exceptions import RedisError
+except ImportError:
+    Redis = None
+
+    class RedisError(Exception):
+        """Fallback exception used when redis-py is not installed yet."""
+
+
 TokenPayload = dict[str, Any]
+logger = logging.getLogger(__name__)
 
 TOKEN_TTL_SECONDS = int(os.getenv("LOOP_ACCESS_TOKEN_TTL_SECONDS", "86400"))
 MAX_REQUEST_BYTES = int(os.getenv("LOOP_MAX_REQUEST_BYTES", str(512 * 1024)))
 RATE_LIMIT_REQUESTS = int(os.getenv("LOOP_RATE_LIMIT_REQUESTS", "120"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("LOOP_RATE_LIMIT_WINDOW_SECONDS", "60"))
+LOOP_REDIS_URL = os.getenv("LOOP_REDIS_URL", "").strip()
 TRUST_X_FORWARDED_FOR = os.getenv("LOOP_TRUST_X_FORWARDED_FOR", "").lower() in {
     "1",
     "true",
@@ -35,12 +47,33 @@ TRUST_X_FORWARDED_FOR = os.getenv("LOOP_TRUST_X_FORWARDED_FOR", "").lower() in {
 }
 
 _runtime_secret = secrets.token_urlsafe(48)
-_rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
+_redis_client: Redis | None = None
+_redis_rate_limiter_unavailable_reason = (
+    "redis-py is not installed"
+    if Redis is None
+    else "LOOP_REDIS_URL is not configured"
+)
+_last_redis_rate_limit_warning_at = 0.0
 
 
 def _secret_key() -> str:
     """Return the configured signing secret, or a per-process fallback."""
     return os.getenv("LOOP_AUTH_SECRET") or _runtime_secret
+
+
+def get_async_redis_client() -> Redis | None:
+    """Return the process-local async Redis client when Redis is configured."""
+    global _redis_client
+    if not LOOP_REDIS_URL or Redis is None:
+        return None
+    if _redis_client is None:
+        _redis_client = Redis.from_url(
+            LOOP_REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+    return _redis_client
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -170,6 +203,56 @@ def require_admin_key(x_loop_admin_key: str | None = Header(default=None)) -> No
         )
 
 
+def _warn_rate_limiter_unavailable(message: str, exc: Exception | None = None) -> None:
+    """Throttle Redis warning logs so a Redis outage does not flood logs."""
+    global _last_redis_rate_limit_warning_at
+    now = time.monotonic()
+    if now - _last_redis_rate_limit_warning_at < 60:
+        return
+    _last_redis_rate_limit_warning_at = now
+    if exc is None:
+        logger.warning(message)
+    else:
+        logger.warning("%s: %s", message, exc)
+
+
+async def _is_request_allowed_by_redis(client_key: str) -> bool:
+    """Return False when Redis says this client exceeded the fixed-window limit."""
+    if RATE_LIMIT_REQUESTS <= 0 or RATE_LIMIT_WINDOW_SECONDS <= 0:
+        return True
+    redis_client = get_async_redis_client()
+    if redis_client is None:
+        _warn_rate_limiter_unavailable(
+            (
+                "Redis rate limiter is unavailable "
+                f"({_redis_rate_limiter_unavailable_reason}); allowing request."
+            ),
+        )
+        return True
+
+    client_digest = hashlib.sha256(client_key.encode("utf-8")).hexdigest()
+    window_id = int(time.time() // RATE_LIMIT_WINDOW_SECONDS)
+    redis_key = f"loop:rate_limit:{client_digest}:{window_id}"
+    try:
+        async with redis_client.pipeline(transaction=True) as pipe:
+            pipe.incr(redis_key)
+            pipe.ttl(redis_key)
+            request_count_raw, ttl_raw = await pipe.execute()
+        request_count = int(request_count_raw)
+        ttl_seconds = int(ttl_raw)
+        if request_count == 1 or ttl_seconds < 0:
+            async with redis_client.pipeline(transaction=True) as pipe:
+                pipe.expire(redis_key, RATE_LIMIT_WINDOW_SECONDS)
+                await pipe.execute()
+        return request_count <= RATE_LIMIT_REQUESTS
+    except (RedisError, OSError, ValueError) as exc:
+        _warn_rate_limiter_unavailable(
+            "Redis rate limiter failed; allowing request",
+            exc,
+        )
+        return True
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add browser-facing hardening headers to every response."""
 
@@ -215,7 +298,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """In-memory per-client rate limiter for the MVP deployment."""
+    """Redis-backed per-client fixed-window rate limiter."""
 
     async def dispatch(
         self,
@@ -231,15 +314,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             client_ip = forwarded_for.split(",", 1)[0].strip() or client_ip
         client_key = client_ip or "unknown"
 
-        now = time.monotonic()
-        hits = _rate_limit_hits[client_key]
-        while hits and now - hits[0] > RATE_LIMIT_WINDOW_SECONDS:
-            hits.popleft()
-        if len(hits) >= RATE_LIMIT_REQUESTS:
+        if not await _is_request_allowed_by_redis(client_key):
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={"detail": "Too many requests. Please slow down."},
                 headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
             )
-        hits.append(now)
         return await call_next(request)

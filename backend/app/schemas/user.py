@@ -93,3 +93,11 @@ class AgentSessionChoiceOut(BaseModel):
 
     user: UserOut
     agent: AgentOut
+
+
+class NpcAgentSenderSeedOut(BaseModel):
+    """NPC agent created or reused for one imported sender id."""
+
+    sender_id: str
+    user: UserOut
+    agent: AgentOut

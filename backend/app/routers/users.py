@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session
 from app.crud import agent as agent_crud
 from app.crud import user as user_crud
 from app.database import get_db
-from app.schemas.agent import AgentOut
+from app.schemas.agent import AgentOut, NpcAgentSenderSeedCreate
 from app.schemas.user import (
     AgentSessionChoiceOut,
     AuthSessionOut,
+    NpcAgentSenderSeedOut,
     QuestionnaireCreate,
     QuestionnaireSubmissionOut,
     UserCreate,
@@ -23,6 +24,7 @@ from app.security import (
     require_admin_key,
     require_same_user,
 )
+from app.services.npc_seed import ensure_npc_agent_for_sender
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -109,6 +111,36 @@ def create_agent_session_choice(
         access_token=create_access_token(db_agent.user),
         expires_in=TOKEN_TTL_SECONDS,
     )
+
+
+@router.post(
+    "/npc-agents/from-senders",
+    response_model=list[NpcAgentSenderSeedOut],
+    status_code=status.HTTP_201_CREATED,
+)
+def create_npc_agents_from_senders(
+    npc_seed_in: NpcAgentSenderSeedCreate,
+    db: Session = Depends(get_db),
+    _admin_key: None = Depends(require_admin_key),
+) -> list[NpcAgentSenderSeedOut]:
+    """Create or reuse dedicated NPC agents for imported group-chat senders."""
+    results: list[NpcAgentSenderSeedOut] = []
+    try:
+        for sender_id in npc_seed_in.sender_ids:
+            system_user, db_agent = ensure_npc_agent_for_sender(db, sender_id)
+            results.append(
+                NpcAgentSenderSeedOut(
+                    sender_id=sender_id,
+                    user=system_user,
+                    agent=db_agent,
+                ),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return results
 
 
 @router.post(

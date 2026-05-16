@@ -16,9 +16,12 @@ def get_agent(db: Session, agent_id: int) -> models.Agent | None:
     return db.query(models.Agent).filter(models.Agent.id == agent_id).first()
 
 
-def get_agents(db: Session) -> list[models.Agent]:
+def get_agents(db: Session, include_npc: bool = True) -> list[models.Agent]:
     """Return all agents in the simulation world."""
-    return db.query(models.Agent).order_by(models.Agent.id.asc()).all()
+    query = db.query(models.Agent)
+    if not include_npc:
+        query = query.filter(models.Agent.is_npc.is_(False))
+    return query.order_by(models.Agent.is_npc.desc(), models.Agent.id.asc()).all()
 
 
 def get_agent_by_user_id(db: Session, user_id: int) -> models.Agent | None:
@@ -66,6 +69,7 @@ def create_agent(db: Session, agent_in: AgentCreate) -> models.Agent:
             "user_id": db_agent.user_id,
             "agent_name": db_agent.agent_name,
             "system_prompt_base": db_agent.system_prompt_base,
+            "is_npc": db_agent.is_npc,
         },
         timestamp=timestamp,
         commit=False,

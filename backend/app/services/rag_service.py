@@ -1,36 +1,52 @@
-"""Local RAG service for user-scoped digital memories."""
+"""Async Postgres/pgvector RAG service for user-scoped digital memories."""
 
-from functools import lru_cache
+from __future__ import annotations
+
+import asyncio
+import json
 import logging
 import os
 from pathlib import Path
 import re
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
+from sqlalchemy import text
+
+from app.database import IS_POSTGRES, SessionLocal
+from app.security import RedisError, get_async_redis_client
+from app.services.infinity_client import get_infinity_client
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env")
 
-CHROMA_PATH = PROJECT_ROOT / "chroma_db"
-COLLECTION_NAME = "loop_memories_bge_v1"
-MODEL_NAME = "BAAI/bge-large-zh-v1.5"
-EMBEDDING_DIMENSIONS = 1024
-RERANKER_MODEL_NAME = "BAAI/bge-reranker-large"
-EMBEDDING_DEVICE_ENV = "LOOP_EMBEDDING_DEVICE"
-RERANKER_DEVICE_ENV = "LOOP_RERANKER_DEVICE"
+EMBEDDING_MODEL_ENV = "LOOP_EMBEDDING_MODEL"
+RERANKER_MODEL_ENV = "LOOP_RERANKER_MODEL"
+EMBEDDING_BASE_URL_ENV = "LOOP_EMBEDDING_BASE_URL"
+RERANKER_BASE_URL_ENV = "LOOP_RERANKER_BASE_URL"
+LEGACY_EMBEDDING_URL_ENV = "INFINITY_EMBEDDING_URL"
+LEGACY_RERANKER_URL_ENV = "INFINITY_RERANKER_URL"
+DEFAULT_EMBEDDING_BASE_URL = "http://127.0.0.1:7997"
+DEFAULT_RERANKER_BASE_URL = "http://127.0.0.1:7998"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-large"
 VECTOR_RAG_ENABLED_ENV = "LOOP_VECTOR_RAG_ENABLED"
 RERANKER_ENABLED_ENV = "LOOP_RERANKER_ENABLED"
 RAG_STRICT_ENV = "LOOP_RAG_STRICT"
 RAG_PRELOAD_ENV = "LOOP_RAG_PRELOAD"
+RAG_WARMUP_DONE_TTL_ENV = "LOOP_RAG_WARMUP_TTL_SECONDS"
+RAG_WARMUP_LOCK_TTL_ENV = "LOOP_RAG_WARMUP_LOCK_TTL_SECONDS"
 MAX_CHUNK_CHARS = 300
 RECALL_TOP_K = 15
 FALLBACK_SCAN_LIMIT = 50
 MIN_MEMORY_RESULTS = 2
 BGE_QUERY_INSTRUCTION = "为这个句子生成表示以用于检索相关文章："
+DEFAULT_RAG_WARMUP_DONE_TTL_SECONDS = 300
+DEFAULT_RAG_WARMUP_LOCK_TTL_SECONDS = 60
+RAG_WARMUP_DONE_KEY = "loop:rag:warmup_done"
+RAG_WARMUP_LOCK_KEY = "loop:rag:warmup_lock"
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +63,63 @@ def _strict_rag_enabled() -> bool:
     return _env_flag(RAG_STRICT_ENV, default=True)
 
 
-def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def _embedding_model() -> str:
+    return os.getenv(EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL).strip()
+
+
+def _reranker_model() -> str:
+    return os.getenv(RERANKER_MODEL_ENV, DEFAULT_RERANKER_MODEL).strip()
+
+
+def _endpoint_from_env(
+    legacy_url_env: str,
+    base_url_env: str,
+    default_base_url: str,
+    path: str,
+) -> str:
+    legacy_url = os.getenv(legacy_url_env, "").strip()
+    if legacy_url:
+        return legacy_url.rstrip("/") if legacy_url.endswith(path) else f"{legacy_url.rstrip('/')}{path}"
+    base_url = os.getenv(base_url_env, default_base_url).strip().rstrip("/")
+    return f"{base_url}{path}"
+
+
+def _embedding_url() -> str:
+    return _endpoint_from_env(
+        LEGACY_EMBEDDING_URL_ENV,
+        EMBEDDING_BASE_URL_ENV,
+        DEFAULT_EMBEDDING_BASE_URL,
+        "/embeddings",
+    )
+
+
+def _reranker_url() -> str:
+    return _endpoint_from_env(
+        LEGACY_RERANKER_URL_ENV,
+        RERANKER_BASE_URL_ENV,
+        DEFAULT_RERANKER_BASE_URL,
+        "/rerank",
+    )
+
+
+def _chunk_text(text_value: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     """Split memory text into compact chunks suitable for vector search."""
-    paragraphs = [part.strip() for part in text.splitlines() if part.strip()]
+    paragraphs = [part.strip() for part in text_value.splitlines() if part.strip()]
     if not paragraphs:
-        paragraphs = [text.strip()]
+        paragraphs = [text_value.strip()]
 
     chunks: list[str] = []
     current = ""
-
     for paragraph in paragraphs:
         remaining = paragraph
         while len(remaining) > max_chars:
@@ -80,216 +144,301 @@ def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
 
     if current:
         chunks.append(current)
-
     return chunks
 
 
-@lru_cache(maxsize=1)
-def _get_embedding_model() -> Any:
-    """Load the local sentence-transformer model on first use."""
+def _parse_embedding_response(data: dict[str, Any]) -> list[float]:
+    """Extract one embedding from an Infinity-compatible response."""
     try:
-        from sentence_transformers import SentenceTransformer
-    except Exception as exc:
-        raise RuntimeError(
-            "sentence-transformers is not installed or could not be imported.",
-        ) from exc
+        embedding = data["data"][0]["embedding"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Infinity embedding response had unexpected shape.") from exc
+    if not isinstance(embedding, list):
+        raise RuntimeError("Infinity embedding response did not contain a list.")
+    try:
+        return [float(value) for value in embedding]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Infinity embedding response contained invalid values.") from exc
 
-    device = _get_embedding_device()
-    try:
-        return SentenceTransformer(MODEL_NAME, device=device)
-    except Exception as exc:
-        logger.warning(
-            "Failed to load embedding model '%s' on %s: %s",
-            MODEL_NAME,
-            device,
-            exc,
+
+async def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Return Infinity embeddings as plain Python lists."""
+    embeddings: list[list[float]] = []
+    url = _embedding_url()
+    client = get_infinity_client()
+    for text_value in texts:
+        data = await client.post(
+            url,
+            {"input": text_value, "model": _embedding_model()},
         )
-        if device != "cpu" and not os.getenv(EMBEDDING_DEVICE_ENV):
-            try:
-                logger.warning("Retrying embedding model '%s' on CPU.", MODEL_NAME)
-                return SentenceTransformer(MODEL_NAME, device="cpu")
-            except Exception as cpu_exc:
-                logger.warning(
-                    "Failed to load embedding model '%s' on CPU: %s",
-                    MODEL_NAME,
-                    cpu_exc,
-                )
-        raise RuntimeError(
-            f"Failed to load local embedding model '{MODEL_NAME}'.",
-        ) from exc
+        embeddings.append(_parse_embedding_response(data))
+    return embeddings
 
 
-def _get_embedding_device() -> str:
-    """Choose the embedding device, preferring CUDA when available."""
-    configured_device = os.getenv(EMBEDDING_DEVICE_ENV)
-    if configured_device:
-        return configured_device
-
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda:0"
-    except Exception:
-        pass
-
-    return "cpu"
-
-
-def _get_reranker_device() -> str:
-    """Choose the reranker device, spreading large models across GPUs by default."""
-    configured_device = os.getenv(RERANKER_DEVICE_ENV)
-    if configured_device:
-        return configured_device
-
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda:1" if torch.cuda.device_count() >= 2 else "cuda:0"
-    except Exception:
-        pass
-
-    return "cpu"
-
-
-@lru_cache(maxsize=1)
-def _get_collection() -> Any:
-    """Create or load the persistent Chroma collection."""
-    try:
-        import chromadb
-    except Exception as exc:
-        raise RuntimeError("chromadb is not installed or could not be imported.") from exc
-
-    try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        return client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={
-                "embedding_model": MODEL_NAME,
-                "embedding_dimensions": EMBEDDING_DIMENSIONS,
-                "reranker_model": RERANKER_MODEL_NAME,
-                "retrieval_pipeline": "vector_recall_cross_encoder_rerank",
-            },
-        )
-    except Exception as exc:
-        raise RuntimeError("Failed to initialize the local ChromaDB store.") from exc
-
-
-@lru_cache(maxsize=1)
-def _get_reranker() -> Any | None:
-    """Load the BGE cross-encoder reranker, falling back cleanly if unavailable."""
-    if not _env_flag(RERANKER_ENABLED_ENV, default=True):
-        return None
-
-    try:
-        from sentence_transformers import CrossEncoder
-    except Exception as exc:
-        if _strict_rag_enabled():
-            raise RuntimeError("sentence-transformers CrossEncoder import failed.") from exc
-        logger.warning("sentence-transformers CrossEncoder import failed: %s", exc)
-        return None
-
-    device = _get_reranker_device()
-    try:
-        return CrossEncoder(RERANKER_MODEL_NAME, device=device, max_length=512)
-    except Exception as exc:
-        if _strict_rag_enabled() or os.getenv(RERANKER_DEVICE_ENV):
-            raise RuntimeError(
-                f"Failed to load reranker '{RERANKER_MODEL_NAME}' on {device}.",
-            ) from exc
-        logger.warning(
-            "Failed to load reranker '%s' on %s: %s",
-            RERANKER_MODEL_NAME,
-            device,
-            exc,
-        )
-        if device == "cpu" or os.getenv(RERANKER_DEVICE_ENV):
-            return None
-
-    try:
-        logger.warning("Retrying reranker '%s' on CPU.", RERANKER_MODEL_NAME)
-        return CrossEncoder(RERANKER_MODEL_NAME, device="cpu", max_length=512)
-    except Exception as exc:
-        logger.warning(
-            "Failed to load reranker '%s' on CPU: %s",
-            RERANKER_MODEL_NAME,
-            exc,
-        )
-        return None
-
-
-def _embed_texts(texts: list[str]) -> list[list[float]]:
-    """Return plain Python-list embeddings for ChromaDB."""
-    model = _get_embedding_model()
-    embeddings = model.encode(
-        texts,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
-    return embeddings.tolist()
-
-
-def warm_up_rag_models() -> None:
-    """Load local RAG models during API startup so chat latency is predictable."""
-    if not _env_flag(RAG_PRELOAD_ENV, default=True):
-        return
-
-    _get_collection()
-    if _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
-        _embed_texts(["Loop RAG warmup"])
-
-    if _env_flag(RERANKER_ENABLED_ENV, default=True):
-        _rerank_documents("Loop RAG warmup", ["Loop RAG warmup memory"], top_k=1)
-
-
-def _embed_query(query: str) -> list[float]:
+async def _embed_query(query: str) -> list[float] | None:
     """Embed a retrieval query with the BGE Chinese retrieval instruction."""
-    return _embed_texts([f"{BGE_QUERY_INSTRUCTION}{query}"])[0]
+    embeddings = await _embed_texts([f"{BGE_QUERY_INSTRUCTION}{query}"])
+    return embeddings[0] if embeddings else None
 
 
-def _read_user_documents_from_sqlite(
-    user_id: int,
-    limit: int,
-    branch_id: str = "main",
-) -> list[str]:
-    """Read stored Chroma documents for a user without starting the Chroma client."""
-    database_path = CHROMA_PATH / "chroma.sqlite3"
-    if not database_path.exists() or limit <= 0:
-        return []
+def _parse_reranker_scores(data: dict[str, Any], documents: list[str]) -> list[float]:
+    """Extract per-document rerank scores from common Infinity response shapes."""
+    raw_items = data.get("results")
+    if raw_items is None:
+        raw_items = data.get("data")
+    if raw_items is None:
+        raw_items = data.get("scores")
+    if not isinstance(raw_items, list):
+        raise RuntimeError("Infinity reranker response had unexpected shape.")
 
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    scores: list[float | None] = [None] * len(documents)
     try:
-        normalized_branch_id = (branch_id or "main").strip() or "main"
-        rows = connection.execute(
-            """
-            SELECT document_metadata.string_value
-            FROM embeddings
-            JOIN embedding_metadata AS user_metadata
-              ON user_metadata.id = embeddings.id
-             AND user_metadata.key = 'user_id'
-             AND user_metadata.int_value = ?
-            JOIN embedding_metadata AS branch_metadata
-              ON branch_metadata.id = embeddings.id
-             AND branch_metadata.key = 'branch_id'
-             AND branch_metadata.string_value = ?
-            JOIN embedding_metadata AS document_metadata
-              ON document_metadata.id = embeddings.id
-             AND document_metadata.key = 'chroma:document'
-            ORDER BY embeddings.id DESC
-            LIMIT ?
-            """,
-            (user_id, normalized_branch_id, limit),
-        ).fetchall()
-    finally:
-        connection.close()
+        if raw_items and isinstance(raw_items[0], dict):
+            for fallback_index, item in enumerate(raw_items):
+                index = int(item.get("index", fallback_index))
+                score_value = item.get("relevance_score", item.get("score"))
+                if score_value is None:
+                    score_value = item.get("rerank_score")
+                if 0 <= index < len(scores) and score_value is not None:
+                    scores[index] = float(score_value)
+        else:
+            for index, score_value in enumerate(raw_items[: len(scores)]):
+                scores[index] = float(score_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Infinity reranker response contained invalid scores.") from exc
 
-    return [row[0] for row in rows if row[0]]
+    if any(score is None for score in scores):
+        raise RuntimeError("Infinity reranker response did not score every document.")
+    return [float(score) for score in scores]
 
 
-def _tokens_for_ranking(text: str) -> set[str]:
+async def _rerank_documents(query: str, documents: list[str], top_k: int) -> list[str]:
+    """Rerank recalled chunks through the Infinity reranker service."""
+    if not _env_flag(RERANKER_ENABLED_ENV, default=True):
+        return documents[:top_k]
+
+    data = await get_infinity_client().post(
+        _reranker_url(),
+        {
+            "query": query,
+            "documents": documents,
+            "model": _reranker_model(),
+        },
+    )
+    scores = _parse_reranker_scores(data, documents)
+    scored_documents = [
+        (float(score), index, document)
+        for index, (score, document) in enumerate(zip(scores, documents))
+    ]
+    scored_documents.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    return [document for _, _, document in scored_documents[:top_k]]
+
+
+def _vector_literal(embedding: list[float]) -> str:
+    """Render a pgvector literal without relying on a driver-specific adapter."""
+    return "[" + ",".join(f"{float(value):.12g}" for value in embedding) + "]"
+
+
+def _require_postgres_vector_store() -> None:
+    if not IS_POSTGRES:
+        raise RuntimeError(
+            "Postgres with pgvector is required for stateless RAG storage.",
+        )
+
+
+def _insert_documents_sync(
+    ids: list[str],
+    documents: list[str],
+    embeddings: list[list[float]],
+    metadatas: list[dict[str, Any]],
+) -> int:
+    _require_postgres_vector_store()
+    with SessionLocal() as db:
+        for document_id, document, embedding, metadata in zip(
+            ids,
+            documents,
+            embeddings,
+            metadatas,
+        ):
+            db.execute(
+                text(
+                    """
+                    INSERT INTO rag_documents (id, content, metadata, embedding)
+                    VALUES (
+                        :id,
+                        :content,
+                        CAST(:metadata AS jsonb),
+                        CAST(:embedding AS vector)
+                    )
+                    ON CONFLICT (id) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        metadata = EXCLUDED.metadata,
+                        embedding = EXCLUDED.embedding,
+                        updated_at = now()
+                    """,
+                ),
+                {
+                    "id": document_id,
+                    "content": document,
+                    "metadata": json.dumps(metadata, ensure_ascii=False),
+                    "embedding": _vector_literal(embedding),
+                },
+            )
+        db.commit()
+    return len(documents)
+
+
+def _recall_documents_sync(
+    user_id: int,
+    branch_id: str,
+    query_embedding: list[float],
+    limit: int,
+    agent_id: int | None = None,
+) -> tuple[list[str], float | str]:
+    _require_postgres_vector_store()
+    participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    content,
+                    embedding <=> CAST(:query_embedding AS vector) AS distance
+                FROM rag_documents
+                WHERE embedding IS NOT NULL
+                  AND metadata ->> 'branch_id' = :branch_id
+                  AND (
+                    (
+                      metadata ? 'user_id'
+                      AND (metadata ->> 'user_id')::integer = :user_id
+                    )
+                    OR (
+                      :agent_id IS NOT NULL
+                      AND metadata ? 'agent_id'
+                      AND metadata ->> 'agent_id' ~ '^\\d+$'
+                      AND (metadata ->> 'agent_id')::integer = :agent_id
+                    )
+                    OR (
+                      :agent_id IS NOT NULL
+                      AND metadata ? 'participant_agent_ids'
+                      AND metadata -> 'participant_agent_ids' @> CAST(:participant_agent_ids AS jsonb)
+                    )
+                  )
+                ORDER BY embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :limit
+                """,
+            ),
+            {
+                "query_embedding": _vector_literal(query_embedding),
+                "branch_id": branch_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "participant_agent_ids": participant_agent_ids,
+                "limit": limit,
+            },
+        ).all()
+    documents = [str(row[0]) for row in rows if row[0]]
+    top_score: float | str = float(rows[0][1]) if rows else "N/A"
+    return documents, top_score
+
+
+def _read_recent_documents_sync(
+    user_id: int,
+    branch_id: str,
+    limit: int,
+    agent_id: int | None = None,
+) -> list[str]:
+    _require_postgres_vector_store()
+    participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT content
+                FROM rag_documents
+                WHERE metadata ->> 'branch_id' = :branch_id
+                  AND (
+                    (
+                      metadata ? 'user_id'
+                      AND (metadata ->> 'user_id')::integer = :user_id
+                    )
+                    OR (
+                      :agent_id IS NOT NULL
+                      AND metadata ? 'agent_id'
+                      AND metadata ->> 'agent_id' ~ '^\\d+$'
+                      AND (metadata ->> 'agent_id')::integer = :agent_id
+                    )
+                    OR (
+                      :agent_id IS NOT NULL
+                      AND metadata ? 'participant_agent_ids'
+                      AND metadata -> 'participant_agent_ids' @> CAST(:participant_agent_ids AS jsonb)
+                    )
+                  )
+                ORDER BY created_at DESC, id DESC
+                LIMIT :limit
+                """,
+            ),
+            {
+                "branch_id": branch_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "participant_agent_ids": participant_agent_ids,
+                "limit": limit,
+            },
+        ).all()
+    return [str(row[0]) for row in rows if row[0]]
+
+
+async def _insert_documents(
+    ids: list[str],
+    documents: list[str],
+    embeddings: list[list[float]],
+    metadatas: list[dict[str, Any]],
+) -> int:
+    return await asyncio.to_thread(
+        _insert_documents_sync,
+        ids,
+        documents,
+        embeddings,
+        metadatas,
+    )
+
+
+async def _recall_documents(
+    user_id: int,
+    branch_id: str,
+    query_embedding: list[float],
+    limit: int,
+    agent_id: int | None = None,
+) -> tuple[list[str], float | str]:
+    return await asyncio.to_thread(
+        _recall_documents_sync,
+        user_id,
+        branch_id,
+        query_embedding,
+        limit,
+        agent_id,
+    )
+
+
+async def _read_recent_documents(
+    user_id: int,
+    branch_id: str,
+    limit: int,
+    agent_id: int | None = None,
+) -> list[str]:
+    return await asyncio.to_thread(
+        _read_recent_documents_sync,
+        user_id,
+        branch_id,
+        limit,
+        agent_id,
+    )
+
+
+def _tokens_for_ranking(text_value: str) -> set[str]:
     """Create lightweight Chinese/English tokens for fallback reranking."""
-    normalized = text.lower()
+    normalized = text_value.lower()
     cjk_chars = re.findall(r"[\u4e00-\u9fff]", normalized)
     cjk_bigrams = {
         "".join(cjk_chars[index : index + 2])
@@ -308,14 +457,12 @@ def _rank_documents(query: str, documents: list[str], top_k: int) -> list[str]:
     query_tokens = _tokens_for_ranking(query)
     ranked: list[tuple[int, int, str]] = []
     normalized_query = query.lower()
-
     for index, document in enumerate(documents):
         document_tokens = _tokens_for_ranking(document)
         score = len(query_tokens & document_tokens)
         if normalized_query and normalized_query in document.lower():
             score += 20
         ranked.append((score, -index, document))
-
     ranked.sort(reverse=True)
     return [document for _, _, document in ranked[:top_k]]
 
@@ -333,69 +480,103 @@ def _dedupe_documents(documents: list[str]) -> list[str]:
     return unique_documents
 
 
-def _rerank_documents(query: str, documents: list[str], top_k: int) -> list[str]:
-    """Rerank recalled chunks with a BGE cross-encoder."""
-    reranker = _get_reranker()
-    if reranker is None:
-        return documents[:top_k]
+async def warm_up_rag_models() -> None:
+    """Warm external RAG services without loading models in FastAPI workers."""
+    if not _env_flag(RAG_PRELOAD_ENV, default=True):
+        return
 
-    pairs = [[query, document] for document in documents]
+    redis_client = get_async_redis_client()
+    done_ttl_seconds = _int_env(
+        RAG_WARMUP_DONE_TTL_ENV,
+        DEFAULT_RAG_WARMUP_DONE_TTL_SECONDS,
+    )
+    lock_ttl_seconds = _int_env(
+        RAG_WARMUP_LOCK_TTL_ENV,
+        DEFAULT_RAG_WARMUP_LOCK_TTL_SECONDS,
+    )
+    if redis_client is not None:
+        try:
+            if done_ttl_seconds > 0 and await redis_client.exists(RAG_WARMUP_DONE_KEY):
+                logger.debug("Skipping RAG warmup because a recent warmup already ran.")
+                return
+            claimed = await redis_client.set(
+                RAG_WARMUP_LOCK_KEY,
+                "1",
+                nx=True,
+                ex=max(1, lock_ttl_seconds),
+            )
+            if not claimed:
+                logger.debug(
+                    "Skipping RAG warmup because another worker is warming models.",
+                )
+                return
+        except (RedisError, OSError, ValueError) as exc:
+            logger.warning(
+                "Redis warmup coordination failed; warming this worker without "
+                "a distributed lock: %s",
+                exc,
+            )
+    else:
+        logger.warning(
+            "Redis warmup coordination is unavailable; warming this worker "
+            "without a distributed lock.",
+        )
+
     try:
-        scores = reranker.predict(pairs, show_progress_bar=False)
-    except Exception as exc:
-        if _strict_rag_enabled():
-            raise
-        logger.warning("BGE reranker prediction failed: %s", exc)
-        return documents[:top_k]
+        if _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
+            await _embed_texts(["Loop RAG warmup"])
+        if _env_flag(RERANKER_ENABLED_ENV, default=True):
+            await _rerank_documents(
+                "Loop RAG warmup",
+                ["Loop RAG warmup memory"],
+                top_k=1,
+            )
+    finally:
+        if redis_client is None or done_ttl_seconds <= 0:
+            return
+        try:
+            await redis_client.set(
+                RAG_WARMUP_DONE_KEY,
+                "1",
+                ex=max(1, done_ttl_seconds),
+            )
+        except (RedisError, OSError, ValueError) as exc:
+            logger.warning("Failed to record Redis RAG warmup marker: %s", exc)
 
-    scored_documents = [
-        (float(score), index, document)
-        for index, (score, document) in enumerate(zip(scores, documents))
-    ]
-    scored_documents.sort(key=lambda item: (item[0], -item[1]), reverse=True)
-    return [document for _, _, document in scored_documents[:top_k]]
 
-
-def add_memory(user_id: int, text: str, branch_id: str = "main") -> int:
-    """Chunk and store user memory text in the local Chroma vector store."""
-    chunks = _chunk_text(text)
+async def add_memory(user_id: int, text_value: str, branch_id: str = "main") -> int:
+    """Chunk and store user memory text in Postgres/pgvector."""
+    chunks = _chunk_text(text_value)
     if not chunks:
         return 0
 
-    collection = _get_collection()
-    embeddings = _embed_texts(chunks)
+    embeddings = await _embed_texts(chunks)
+    if len(embeddings) != len(chunks):
+        raise RuntimeError("Infinity embedding returned an incomplete result set.")
     ids = [f"user-{user_id}-{uuid4()}" for _ in chunks]
     metadatas = [
         {
             "user_id": user_id,
             "branch_id": (branch_id or "main").strip() or "main",
-            "embedding_model": MODEL_NAME,
+            "embedding_model": _embedding_model(),
         }
         for _ in chunks
     ]
-
-    collection.add(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
-    return len(chunks)
+    return await _insert_documents(ids, chunks, embeddings, metadatas)
 
 
-def add_scored_memories(
+async def add_scored_memories(
     user_id: int,
     agent_id: int,
     memories: list[dict[str, Any]],
     branch_id: str = "main",
 ) -> int:
-    """Store scored episodic memories while preserving SOTA ranking metadata."""
+    """Store scored episodic memories while preserving ranking metadata."""
     documents: list[str] = []
     metadatas: list[dict[str, Any]] = []
-
     for memory in memories:
-        text = str(memory.get("text") or "").strip()
-        if not text:
+        text_value = str(memory.get("text") or "").strip()
+        if not text_value:
             continue
 
         similarity = max(0.0, min(1.0, float(memory.get("similarity", 0.5))))
@@ -405,7 +586,7 @@ def add_scored_memories(
         if score <= 0:
             continue
 
-        chunks = _chunk_text(text)
+        chunks = _chunk_text(text_value)
         for chunk_index, chunk in enumerate(chunks):
             documents.append(chunk)
             metadatas.append(
@@ -420,36 +601,50 @@ def add_scored_memories(
                     "time_decay": time_decay,
                     "score": score,
                     "chunk_index": chunk_index,
-                    "embedding_model": MODEL_NAME,
+                    "embedding_model": _embedding_model(),
                 },
             )
 
     if not documents:
         return 0
 
-    collection = _get_collection()
-    embeddings = _embed_texts(documents)
+    embeddings = await _embed_texts(documents)
+    if len(embeddings) != len(documents):
+        raise RuntimeError("Infinity embedding returned an incomplete result set.")
     ids = [f"user-{user_id}-episodic-{uuid4()}" for _ in documents]
-    collection.add(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
-    return len(documents)
+    return await _insert_documents(ids, documents, embeddings, metadatas)
 
 
-def add_agent_chat_memories(
+async def add_agent_chat_memories(
     user_id: int,
     target_agent_id: int,
     messages: list[dict[str, Any]],
     branch_id: str = "main",
     topic: str | None = None,
+    participant_agent_ids: list[int] | None = None,
+    source_id: str | None = None,
 ) -> int:
-    """Store group-chat memory from one target agent's private perspective."""
+    """Store group-chat memory with shared access for all mapped participants."""
     documents: list[str] = []
     metadatas: list[dict[str, Any]] = []
     normalized_topic = str(topic or "").strip()
+    normalized_participant_agent_ids = sorted(
+        {
+            int(agent_id)
+            for agent_id in (participant_agent_ids or [])
+            if int(agent_id) > 0
+        }
+        | {int(target_agent_id)}
+        | {
+            int(message["sender_agent_id"])
+            for message in messages
+            if int(message["sender_agent_id"]) > 0
+        },
+    )
+    normalized_source_id = (
+        str(source_id or "").strip()
+        or f"group-chat-import-{uuid4()}"
+    )
 
     for message in messages:
         sender_agent_id = int(message["sender_agent_id"])
@@ -457,9 +652,8 @@ def add_agent_chat_memories(
         if not content:
             continue
 
-        speaker = "me" if sender_agent_id == target_agent_id else "others"
         timestamp = str(message.get("timestamp") or "").strip()
-        speaker_label = "我" if speaker == "me" else f"Agent #{sender_agent_id}"
+        speaker_label = f"Agent #{sender_agent_id}"
         timestamp_prefix = f"[{timestamp}] " if timestamp else ""
         memory_text = f"{timestamp_prefix}{speaker_label}: {content}"
 
@@ -470,43 +664,93 @@ def add_agent_chat_memories(
                 "branch_id": (branch_id or "main").strip() or "main",
                 "agent_id": target_agent_id,
                 "target_agent_id": target_agent_id,
+                "participant_agent_ids": normalized_participant_agent_ids,
+                "source_id": normalized_source_id,
                 "source": "group_chat_import",
-                "speaker": speaker,
+                "speaker": "self" if sender_agent_id == target_agent_id else "participant",
                 "sender_agent_id": sender_agent_id,
-                "embedding_model": MODEL_NAME,
+                "embedding_model": _embedding_model(),
                 "chunk_index": chunk_index,
             }
             if timestamp:
                 metadata["timestamp"] = timestamp
             if normalized_topic:
                 metadata["topic"] = normalized_topic
-            if speaker == "others":
+            if sender_agent_id != target_agent_id:
                 metadata["original_speaker_id"] = sender_agent_id
-
             documents.append(chunk)
             metadatas.append(metadata)
 
     if not documents:
         return 0
 
-    collection = _get_collection()
-    embeddings = _embed_texts(documents)
+    embeddings = await _embed_texts(documents)
+    if len(embeddings) != len(documents):
+        raise RuntimeError("Infinity embedding returned an incomplete result set.")
     ids = [f"agent-{target_agent_id}-group-chat-{uuid4()}" for _ in documents]
+    return await _insert_documents(ids, documents, embeddings, metadatas)
 
-    collection.add(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metadatas,
+
+def _sync_group_chat_memory_access_sync(
+    source_id: str,
+    participant_agent_ids: list[int],
+) -> int:
+    """Grant this group-chat batch to every mapped participant Agent."""
+    _require_postgres_vector_store()
+    normalized_source_id = source_id.strip()
+    normalized_participant_agent_ids = sorted(
+        {int(agent_id) for agent_id in participant_agent_ids if int(agent_id) > 0},
     )
-    return len(documents)
+    if not normalized_source_id or not normalized_participant_agent_ids:
+        return 0
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                UPDATE rag_documents
+                SET metadata = jsonb_set(
+                    metadata,
+                    '{participant_agent_ids}',
+                    CAST(:participant_agent_ids AS jsonb),
+                    true
+                ),
+                    updated_at = now()
+                WHERE metadata ->> 'source_id' = :source_id
+                  AND metadata ->> 'source' = 'group_chat_import'
+                """,
+            ),
+            {
+                "source_id": normalized_source_id,
+                "participant_agent_ids": json.dumps(
+                    normalized_participant_agent_ids,
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        db.commit()
+        return int(rows.rowcount or 0)
 
 
-def retrieve_memory(
+async def sync_group_chat_memory_access(
+    source_id: str,
+    participant_agent_ids: list[int],
+) -> int:
+    """Synchronize shared access for an already-written group-chat batch."""
+    return await asyncio.to_thread(
+        _sync_group_chat_memory_access_sync,
+        source_id,
+        participant_agent_ids,
+    )
+
+
+async def retrieve_memory(
     user_id: int,
     query: str,
     top_k: int = 3,
     branch_id: str = "main",
+    source: str = "general",
+    agent_id: int | None = None,
 ) -> list[str]:
     """Retrieve relevant memory chunks with two-stage Advanced RAG."""
     clean_query = query.strip()
@@ -514,53 +758,57 @@ def retrieve_memory(
         return []
 
     normalized_branch_id = (branch_id or "main").strip() or "main"
-    logger.info(f"[RAG Engine] Querying Memory Vault for: '{clean_query}'")
+    logger.info(
+        "[RAG Engine] Querying Memory Vault source=%s branch_id=%s query=%r",
+        source,
+        normalized_branch_id,
+        clean_query,
+    )
     top_score: float | str = "N/A"
     recalled_documents: list[str] = []
     if clean_query and _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
         try:
-            collection = _get_collection()
-            query_embedding = _embed_query(clean_query)
-            where_filter: dict[str, Any] = {
-                "$and": [
-                    {"user_id": user_id},
-                    {"branch_id": normalized_branch_id},
-                ],
-            }
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=max(RECALL_TOP_K, top_k),
-                where=where_filter,
-            )
-            documents = results.get("documents") or []
-            if documents:
-                recalled_documents.extend(documents[0])
-            distances = results.get("distances") or []
-            if distances and distances[0]:
-                top_score = float(distances[0][0])
+            query_embedding = await _embed_query(clean_query)
+            if query_embedding is not None:
+                recalled_documents, top_score = await _recall_documents(
+                    user_id=user_id,
+                    branch_id=normalized_branch_id,
+                    query_embedding=query_embedding,
+                    limit=max(RECALL_TOP_K, top_k),
+                    agent_id=agent_id,
+                )
         except Exception as exc:
+            logger.warning("Vector recall failed: %s", exc)
             if _strict_rag_enabled():
                 raise
-            logger.warning("BGE vector recall failed: %s", exc)
             recalled_documents = []
 
     recalled_documents = _dedupe_documents(recalled_documents)
-    retrieved = (
-        _rerank_documents(clean_query, recalled_documents, top_k)
-        if clean_query and recalled_documents
-        else recalled_documents[:top_k]
-    )
+    if clean_query and recalled_documents:
+        try:
+            retrieved = await _rerank_documents(clean_query, recalled_documents, top_k)
+        except Exception as exc:
+            logger.warning("Rerank failed; using vector recall order: %s", exc)
+            if _strict_rag_enabled():
+                raise
+            retrieved = recalled_documents[:top_k]
+    else:
+        retrieved = recalled_documents[:top_k]
 
     fallback_limit = max(FALLBACK_SCAN_LIMIT, top_k, MIN_MEMORY_RESULTS)
     try:
-        fallback_documents = _read_user_documents_from_sqlite(
+        fallback_documents = await _read_recent_documents(
             user_id,
-            limit=fallback_limit,
-            branch_id=normalized_branch_id,
+            normalized_branch_id,
+            fallback_limit,
+            agent_id=agent_id,
         )
     except Exception as exc:
-        logger.warning("SQLite memory fallback read failed: %s", exc)
+        logger.warning("Postgres memory fallback read failed: %s", exc)
+        if _strict_rag_enabled() and not retrieved:
+            raise
         fallback_documents = []
+
     if fallback_documents:
         ranked_documents = (
             _rank_documents(clean_query, fallback_documents, top_k)
@@ -590,72 +838,73 @@ def retrieve_memory(
                 break
 
     logger.info(
-        f"[RAG Engine] Retrieved {len(unique_documents)} fragments. "
-        f"Top match score: {top_score}",
+        "[RAG Engine] Retrieved %s fragments. Top match score: %s",
+        len(unique_documents),
+        top_score,
     )
     return unique_documents
 
 
-def retrieve_hybrid_memory(
+def _relationship_context_sync(user_id: int) -> str | None:
+    from app import models
+
+    with SessionLocal() as db:
+        source_agent = (
+            db.query(models.Agent).filter(models.Agent.user_id == user_id).first()
+        )
+        if source_agent is None:
+            return None
+        relationships = (
+            db.query(models.Relationship)
+            .filter(models.Relationship.agent_id_1 == source_agent.id)
+            .order_by(models.Relationship.affinity_score.desc())
+            .limit(8)
+            .all()
+        )
+        if not relationships:
+            return None
+
+        graph_lines: list[str] = []
+        for relationship in relationships:
+            target_agent = (
+                db.query(models.Agent)
+                .filter(models.Agent.id == relationship.agent_id_2)
+                .first()
+            )
+            target_name = (
+                target_agent.agent_name
+                if target_agent is not None
+                else f"Agent #{relationship.agent_id_2}"
+            )
+            graph_lines.append(
+                f"{target_name}: affinity_score={relationship.affinity_score:.2f}",
+            )
+    return "【GraphRAG 社交图谱上下文】\n" + "\n".join(graph_lines)
+
+
+async def retrieve_hybrid_memory(
     user_id: int,
     query: str,
     top_k: int = 3,
     branch_id: str = "main",
+    source: str = "general",
+    agent_id: int | None = None,
 ) -> list[str]:
     """Retrieve vector memories plus graph social context from SQL."""
     normalized_branch_id = (branch_id or "main").strip() or "main"
-    memories = retrieve_memory(
+    memories = await retrieve_memory(
         user_id=user_id,
         query=query,
         top_k=top_k,
         branch_id=normalized_branch_id,
+        source=source,
+        agent_id=agent_id,
     )
     if normalized_branch_id != "main":
         return memories
     try:
-        from app import models
-        from app.database import SessionLocal
-
-        db = SessionLocal()
-        try:
-            source_agent = (
-                db.query(models.Agent)
-                .filter(models.Agent.user_id == user_id)
-                .first()
-            )
-            if source_agent is None:
-                return memories
-            relationships = (
-                db.query(models.Relationship)
-                .filter(models.Relationship.agent_id_1 == source_agent.id)
-                .order_by(models.Relationship.affinity_score.desc())
-                .limit(8)
-                .all()
-            )
-            if not relationships:
-                return memories
-
-            graph_lines: list[str] = []
-            for relationship in relationships:
-                target_agent = (
-                    db.query(models.Agent)
-                    .filter(models.Agent.id == relationship.agent_id_2)
-                    .first()
-                )
-                target_name = (
-                    target_agent.agent_name
-                    if target_agent is not None
-                    else f"Agent #{relationship.agent_id_2}"
-                )
-                graph_lines.append(
-                    f"{target_name}: affinity_score={relationship.affinity_score:.2f}",
-                )
-            return [
-                *memories,
-                "【GraphRAG 社交图谱上下文】\n" + "\n".join(graph_lines),
-            ]
-        finally:
-            db.close()
+        graph_context = await asyncio.to_thread(_relationship_context_sync, user_id)
+        return [*memories, graph_context] if graph_context else memories
     except Exception as exc:
         logger.warning("Hybrid graph retrieval failed: %s", exc)
         return memories

@@ -1,6 +1,5 @@
 """LangGraph engine for Loop agents with tool-use capabilities."""
 
-import json
 import logging
 import os
 import re
@@ -23,11 +22,9 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.services.core_memory_service import (
     format_core_memory_for_prompt,
-    normalize_core_memory,
 )
 from app.services.tools import (
     AGENT_TOOLS,
-    edit_core_memory,
     reset_tool_user_context,
     set_tool_user_context,
 )
@@ -60,7 +57,7 @@ DEFAULT_GRAPH_SUMMARY_REASONING_EFFORT = os.getenv(
     DEFAULT_REASONING_EFFORT,
 )
 DEFAULT_TOPIC = "日常闲聊"
-SHORT_TERM_MEMORY_MESSAGE_LIMIT = 10
+SHORT_TERM_MEMORY_MESSAGE_LIMIT = 60
 SUMMARY_INPUT_MESSAGE_LIMIT = 30
 MAX_CONTEXT_MESSAGE_CHARS = 1600
 ACTIVE_TOPIC_CONTEXT_MESSAGES = SHORT_TERM_MEMORY_MESSAGE_LIMIT
@@ -95,12 +92,7 @@ DEFAULT_CHAT_TIMEOUT_SECONDS = _float_env("LOOP_CHAT_LLM_TIMEOUT_SECONDS", 25.0)
 GRAPH_CHAT_MAX_TOKENS = _int_env("LOOP_GRAPH_CHAT_MAX_TOKENS", 900)
 GRAPH_SUMMARY_MAX_TOKENS = _int_env("LOOP_GRAPH_SUMMARY_MAX_TOKENS", 900)
 GRAPH_TOPIC_MAX_TOKENS = _int_env("LOOP_GRAPH_TOPIC_MAX_TOKENS", 64)
-GRAPH_INTENT_MAX_TOKENS = _int_env("LOOP_GRAPH_INTENT_MAX_TOKENS", 300)
 MAX_CONTEXT_MESSAGE_CHARS = _int_env("LOOP_GRAPH_CONTEXT_MESSAGE_CHARS", 1600)
-CORE_MEMORY_INTENT_LLM_ENABLED = _env_flag(
-    "LOOP_CORE_MEMORY_INTENT_LLM_ENABLED",
-    default=False,
-)
 TOPIC_ROUTER_LLM_ENABLED = _env_flag("LOOP_TOPIC_ROUTER_LLM_ENABLED", default=False)
 
 
@@ -108,6 +100,7 @@ class AgentCognitiveState(TypedDict, total=False):
     """High-dimensional state for a Loop agent's cognitive architecture."""
 
     incoming_messages: list[BaseMessage]
+    external_context_messages: list[BaseMessage]
     active_messages: Annotated[list[BaseMessage], add_messages]
     working_memory: dict[str, list[BaseMessage]]
     topic_summaries: dict[str, str]
@@ -117,9 +110,6 @@ class AgentCognitiveState(TypedDict, total=False):
     system_prompt: str
     core_memory: dict[str, str]
     user_id: int
-    needs_core_update: bool
-    extracted_fact: str
-    force_core_memory_note: str
     emotion: str
     energy: int
     summary: str
@@ -193,7 +183,6 @@ llm = _build_llm()
 llm_with_tools = llm.bind_tools(AGENT_TOOLS)
 summary_llm = _build_post_llm()
 topic_llm = _build_llm().bind(max_tokens=GRAPH_TOPIC_MAX_TOKENS, temperature=0)
-intent_llm = _build_llm().bind(max_tokens=GRAPH_INTENT_MAX_TOKENS, temperature=0)
 memory_saver = MemorySaver()
 
 
@@ -360,7 +349,7 @@ def _heuristic_topic_for_text(text: str, previous_topic: str | None = None) -> s
     return previous_topic or DEFAULT_TOPIC
 
 
-def _classify_topic(
+async def _classify_topic(
     incoming_messages: Sequence[BaseMessage],
     existing_topics: Sequence[str],
     topic_summaries: dict[str, str],
@@ -388,7 +377,7 @@ def _classify_topic(
         f"新消息：\n{transcript}"
     )
     try:
-        response = topic_llm.invoke(
+        response = await topic_llm.ainvoke(
             [
                 SystemMessage(content="你只输出一个主题名。"),
                 HumanMessage(content=prompt),
@@ -403,7 +392,7 @@ def _classify_topic(
     return _heuristic_topic_for_text(transcript, previous_topic)
 
 
-def _summarize_working_memory(
+async def _summarize_working_memory(
     topic: str,
     existing_summary: str,
     messages_to_compress: Sequence[BaseMessage],
@@ -421,7 +410,7 @@ def _summarize_working_memory(
         f"需要压缩的旧工作记忆：\n{transcript}"
     )
     try:
-        response = summary_llm.invoke(
+        response = await summary_llm.ainvoke(
             [
                 SystemMessage(content="你只输出更新后的压缩记忆摘要。"),
                 HumanMessage(content=prompt),
@@ -439,181 +428,7 @@ def _summarize_working_memory(
     return fallback_summary[-2000:]
 
 
-def _latest_human_text(messages: Sequence[BaseMessage]) -> str:
-    """Return the latest raw user message for intent classification."""
-    for message in reversed(messages):
-        if isinstance(message, HumanMessage):
-            return _message_content_to_text(message).strip()
-    return ""
-
-
-def _extract_json_payload(text: str) -> dict[str, object]:
-    """Parse a small JSON object from an LLM response."""
-    clean_text = text.strip()
-    if not clean_text:
-        return {}
-    if clean_text.startswith("```"):
-        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text)
-        clean_text = re.sub(r"\s*```$", "", clean_text)
-
-    match = re.search(r"\{.*\}", clean_text, flags=re.DOTALL)
-    if match:
-        clean_text = match.group(0)
-
-    try:
-        parsed = json.loads(clean_text)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _coerce_json_bool(value: object) -> bool:
-    """Coerce classifier booleans without treating 'false' as truthy."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes"}
-    return False
-
-
-def _fallback_core_memory_intent(user_input: str) -> dict[str, object]:
-    """Conservative keyword fallback if the classifier response is malformed."""
-    lowered = user_input.lower()
-    triggers = [
-        "allergy",
-        "allergic",
-        "career change",
-        "diagnosed",
-        "chronic",
-        "core value",
-        "identity",
-        "过敏",
-        "确诊",
-        "慢性病",
-        "职业",
-        "转行",
-        "离职",
-        "入职",
-        "结婚",
-        "离婚",
-        "怀孕",
-        "价值观",
-        "信念",
-        "身份",
-        "我决定",
-        "我以后",
-    ]
-    needs_core_update = any(trigger in lowered for trigger in triggers)
-    return {
-        "needs_core_update": needs_core_update,
-        "extracted_fact": user_input[:800] if needs_core_update else "",
-    }
-
-
-def detect_core_memory_intent(state: AgentCognitiveState) -> dict[str, object]:
-    """Detect whether this turn must force a Core Memory update."""
-    incoming_messages = list(state.get("incoming_messages") or [])
-    user_input = _latest_human_text(incoming_messages)
-    if not user_input:
-        return {
-            "needs_core_update": False,
-            "extracted_fact": "",
-            "force_core_memory_note": "",
-        }
-
-    parsed = _fallback_core_memory_intent(user_input)
-    if parsed.get("needs_core_update") or not CORE_MEMORY_INTENT_LLM_ENABLED:
-        return {
-            "needs_core_update": bool(parsed.get("needs_core_update")),
-            "extracted_fact": str(parsed.get("extracted_fact") or "")[:1200],
-            "force_core_memory_note": "",
-        }
-
-    classifier_prompt = (
-        "Analyze the user's input. If it contains life-altering facts, severe "
-        "health conditions (allergies), identity shifts, or core values, output "
-        "`needs_core_update: true` and summarize the fact in `extracted_fact`. "
-        "Otherwise, `false`. Output strict JSON only with this schema: "
-        '{"needs_core_update": boolean, "extracted_fact": string}.'
-    )
-    try:
-        response = intent_llm.invoke(
-            [
-                SystemMessage(content=classifier_prompt),
-                HumanMessage(content=user_input),
-            ],
-        )
-        parsed = _extract_json_payload(_message_content_to_text(response))
-    except Exception as exc:
-        logger.warning("Core memory intent classifier failed: %s", exc)
-        parsed = _fallback_core_memory_intent(user_input)
-
-    if not parsed:
-        parsed = _fallback_core_memory_intent(user_input)
-
-    needs_core_update = _coerce_json_bool(parsed.get("needs_core_update"))
-    extracted_fact = str(parsed.get("extracted_fact") or "").strip()
-    if needs_core_update and not extracted_fact:
-        extracted_fact = user_input[:800]
-
-    return {
-        "needs_core_update": needs_core_update,
-        "extracted_fact": extracted_fact[:1200],
-        "force_core_memory_note": "",
-    }
-
-
-def _route_after_core_memory_intent(state: AgentCognitiveState) -> str:
-    return (
-        "force_update_core_memory"
-        if bool(state.get("needs_core_update"))
-        else "route_by_topic"
-    )
-
-
-def force_update_core_memory(state: AgentCognitiveState) -> dict[str, object]:
-    """Persist extracted critical facts before the normal reply actor runs."""
-    extracted_fact = str(state.get("extracted_fact") or "").strip()
-    user_id = state.get("user_id")
-    if not extracted_fact or not isinstance(user_id, int):
-        return {}
-
-    logger.info(
-        f"[Tool Execution] edit_core_memory forcefully triggered. "
-        f"Fact: {extracted_fact}",
-    )
-    current_core_memory = normalize_core_memory(state.get("core_memory"))
-    existing_persona = current_core_memory["persona_traits"].strip()
-    durable_fact = f"- {extracted_fact}"
-    new_persona = (
-        f"{existing_persona}\n{durable_fact}" if existing_persona else durable_fact
-    )[-8000:]
-
-    command = edit_core_memory.invoke(
-        {
-            "args": {
-                "key": "persona_traits",
-                "new_value": new_persona,
-            },
-            "name": "edit_core_memory",
-            "type": "tool_call",
-            "id": "force_core_memory_update",
-        },
-    )
-    command_update = getattr(command, "update", {}) or {}
-    core_memory = command_update.get("core_memory") or current_core_memory
-
-    logger.info(f"[Core Memory Updated] New core concept saved: {extracted_fact}")
-    return {
-        "core_memory": core_memory,
-        "force_core_memory_note": (
-            "你已经把用户刚刚透露的核心事实写入长期 Core Memory。"
-            "现在请正常回复，明确承接这件事，并以稳定、安抚、自然的语气回应用户。"
-        ),
-    }
-
-
-def route_by_topic(state: AgentCognitiveState) -> dict[str, object]:
+async def route_by_topic(state: AgentCognitiveState) -> dict[str, object]:
     """Classify the incoming turn and select the active topic bucket."""
     incoming_messages = list(state.get("incoming_messages") or [])
     incoming_non_system = _clean_message_list(incoming_messages)
@@ -640,7 +455,7 @@ def route_by_topic(state: AgentCognitiveState) -> dict[str, object]:
     if legacy_messages and not working_memory:
         working_memory[previous_topic] = legacy_messages
 
-    active_topic = _classify_topic(
+    active_topic = await _classify_topic(
         incoming_messages=incoming_non_system,
         existing_topics=sorted(working_memory.keys()),
         topic_summaries=topic_summaries,
@@ -658,7 +473,7 @@ def route_by_topic(state: AgentCognitiveState) -> dict[str, object]:
     }
 
 
-def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
+async def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
     """Compress stale topic buckets and build the current LLM context."""
     working_memory = _clean_working_memory(state.get("working_memory"))
     topic_summaries = _clean_topic_summaries(state.get("topic_summaries"))
@@ -667,6 +482,12 @@ def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
     )
     active_topic = _normalize_topic_name(state.get("active_topic"))
     incoming_messages = _clean_message_list(state.get("incoming_messages") or [])
+    external_context = [
+        _trim_message_for_context(message)
+        for message in _clean_message_list(state.get("external_context_messages") or [])[
+            -ACTIVE_TOPIC_CONTEXT_MESSAGES:
+        ]
+    ]
 
     for topic, topic_messages in list(working_memory.items()):
         if len(topic_messages) <= TOPIC_COMPRESSION_THRESHOLD:
@@ -674,7 +495,7 @@ def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
 
         messages_to_compress = topic_messages[:-TOPIC_RETAINED_MESSAGES]
         retained_messages = topic_messages[-TOPIC_RETAINED_MESSAGES:]
-        topic_summaries[topic] = _summarize_working_memory(
+        topic_summaries[topic] = await _summarize_working_memory(
             topic,
             topic_summaries.get(topic, ""),
             messages_to_compress,
@@ -694,14 +515,14 @@ def manage_working_memory(state: AgentCognitiveState) -> dict[str, object]:
         if not unsummarized_messages:
             continue
 
-        topic_summaries[topic] = _summarize_working_memory(
+        topic_summaries[topic] = await _summarize_working_memory(
             topic,
             topic_summaries.get(topic, ""),
             unsummarized_messages,
         )
         topic_summary_offsets[topic] = len(topic_messages)
 
-    active_context = [
+    active_context = external_context or [
         _trim_message_for_context(message)
         for message in working_memory.get(active_topic, [])[
             -ACTIVE_TOPIC_CONTEXT_MESSAGES:
@@ -748,28 +569,17 @@ def _build_state_monitor_prompt(state: AgentCognitiveState) -> str:
     if not isinstance(energy, int):
         energy = 100
     energy = max(0, min(100, energy))
-    force_core_memory_note = str(state.get("force_core_memory_note") or "").strip()
-    force_core_memory_prompt = (
-        f"【强制 Core Memory 写入结果】{force_core_memory_note}\n"
-        if force_core_memory_note
-        else ""
-    )
-
     return (
         f"{core_memory_prompt}\n"
-        f"{force_core_memory_prompt}"
         "【系统状态监控】\n"
         f"当前激活 Topic：{active_topic}\n"
         f"当前 Topic 的压缩摘要：{active_summary}\n"
         f"其他 Topic 的极简摘要：\n{other_summary_text}\n"
         "【上下文路由规则】接下来你只会看到当前 Topic 的最近对话窗口。"
         "其他主题只能通过上面的极简摘要参考，禁止把不相关主题细节混入当前回复。\n"
-        "【Core Memory 强制写入协议】You are equipped with the `edit_core_memory` tool. "
-        "When the user shares life-altering facts, health constraints, or identity shifts, "
-        "you are FORBIDDEN to just say 'I will remember this'. "
-        "You MUST actively execute `edit_core_memory` to save it to your long-term persona. "
-        "这条规则优先于普通文本回复：凡是用户透露长期稳定事实、过敏/健康限制、职业变化、"
-        "关系变化、核心价值观或身份转变，都必须先调用 edit_core_memory 持久化。\n"
+        "【数字分身人设协议】你不是旁观顾问，而是用户人格延展出的数字分身。"
+        "始终以已沉淀的 Core Memory 维持同一个人的经历、价值观、目标和表达习惯；"
+        "用这些稳定经历、关系、目标和表达习惯来维持同一个人的连续感。\n"
         f"你当前的情绪状态：{emotion}\n"
         f"你当前的剩余精力值：{energy}/100。"
         "（注意：如果精力值低于 20，你的回复应该显得疲惫、简短，"
@@ -797,9 +607,9 @@ def _messages_for_llm(state: AgentCognitiveState) -> list[BaseMessage]:
     return [SystemMessage(content=dynamic_system_prompt), *active_messages]
 
 
-def _agent_node(state: AgentCognitiveState) -> dict[str, list[BaseMessage]]:
+async def _agent_node(state: AgentCognitiveState) -> dict[str, list[BaseMessage]]:
     """Ask the model to either answer directly or request a tool call."""
-    response = llm_with_tools.invoke(_messages_for_llm(state))
+    response = await llm_with_tools.ainvoke(_messages_for_llm(state))
     return {"active_messages": [response]}
 
 
@@ -825,24 +635,13 @@ def persist_working_memory(state: AgentCognitiveState) -> dict[str, object]:
 
 def _build_graph():
     graph_builder = StateGraph(AgentCognitiveState)
-    graph_builder.add_node("detect_core_memory_intent", detect_core_memory_intent)
-    graph_builder.add_node("force_update_core_memory", force_update_core_memory)
     graph_builder.add_node("route_by_topic", route_by_topic)
     graph_builder.add_node("manage_working_memory", manage_working_memory)
     graph_builder.add_node("agent", _agent_node)
     graph_builder.add_node("action", ToolNode(AGENT_TOOLS, messages_key="active_messages"))
     graph_builder.add_node("persist_working_memory", persist_working_memory)
 
-    graph_builder.add_edge(START, "detect_core_memory_intent")
-    graph_builder.add_conditional_edges(
-        "detect_core_memory_intent",
-        _route_after_core_memory_intent,
-        {
-            "force_update_core_memory": "force_update_core_memory",
-            "route_by_topic": "route_by_topic",
-        },
-    )
-    graph_builder.add_edge("force_update_core_memory", "route_by_topic")
+    graph_builder.add_edge(START, "route_by_topic")
     graph_builder.add_edge("route_by_topic", "manage_working_memory")
     graph_builder.add_edge("manage_working_memory", "agent")
     graph_builder.add_conditional_edges(
@@ -861,10 +660,12 @@ def _build_graph():
 agent_graph = _build_graph()
 
 
-def invoke_agent_graph(
+async def invoke_agent_graph(
     messages: Sequence[BaseMessage],
     user_id: int | None,
+    agent_id: int | None,
     thread_id: str,
+    context_messages: Sequence[BaseMessage] | None = None,
     emotion: str | None = None,
     energy: int | None = None,
     summary: str | None = None,
@@ -872,8 +673,12 @@ def invoke_agent_graph(
 ) -> BaseMessage:
     """Run the compiled graph with user-scoped tool context."""
     graph_input: dict[str, object] = {"incoming_messages": list(messages)}
+    if context_messages:
+        graph_input["external_context_messages"] = list(context_messages)
     if user_id is not None:
         graph_input["user_id"] = user_id
+    if agent_id is not None:
+        graph_input["agent_id"] = agent_id
     if emotion is not None:
         graph_input["emotion"] = emotion or "平静"
     if energy is not None:
@@ -883,11 +688,17 @@ def invoke_agent_graph(
     if core_memory is not None:
         graph_input["core_memory"] = core_memory
 
-    token = set_tool_user_context(user_id)
+    token = set_tool_user_context(user_id, agent_id)
     try:
-        result = agent_graph.invoke(
+        result = await agent_graph.ainvoke(
             graph_input,
-            config={"configurable": {"user_id": user_id, "thread_id": thread_id}},
+            config={
+                "configurable": {
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "thread_id": thread_id,
+                },
+            },
         )
     finally:
         reset_tool_user_context(token)

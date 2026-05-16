@@ -47,6 +47,7 @@ type ChatMessage = {
 
 type ChatModelChoice = "fast" | "deep";
 type ExperimentModeChoice = "mode_alpha" | "mode_beta";
+type MobilePanel = "sessions" | "settings" | "diagnostics" | null;
 
 type ChatSessionSummary = {
   branch_id: string;
@@ -135,10 +136,10 @@ function truncateSummary(value: string, fallback: string, maxLength = 42) {
 
 export default function ChatPage() {
   const router = useRouter();
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const copy = t.chat;
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const historyRequestIdRef = useRef(0);
   const shouldScrollToBottomRef = useRef(false);
   const pendingScrollAnchorRef = useRef<{
@@ -166,6 +167,7 @@ export default function ChatPage() {
     useState<ExperimentModeChoice>("mode_alpha");
   const [currentTopic, setCurrentTopic] = useState(DEFAULT_CHAT_TOPIC);
   const [isDeveloperPanelOpen, setIsDeveloperPanelOpen] = useState(true);
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [developerSnapshot, setDeveloperSnapshot] =
     useState<DeveloperSnapshot | null>(null);
   const [latestDriftResult, setLatestDriftResult] =
@@ -179,6 +181,24 @@ export default function ChatPage() {
   );
   const currentSessionLabel = getSessionDisplayLabel(currentSessionId);
   const visibleTimelineBranches = uniqueBranches([currentBranch, ...branches]);
+  const mobilePanelCopy =
+    language === "zh"
+      ? {
+          sessions: "会话",
+          sessionsTitle: "会话记录",
+          settings: "设置",
+          settingsTitle: "聊天设置",
+          diagnostics: "诊断",
+          diagnosticsTitle: "心智诊断",
+        }
+      : {
+          sessions: "Chats",
+          sessionsTitle: "Chat history",
+          settings: "Setup",
+          settingsTitle: "Chat setup",
+          diagnostics: "Insight",
+          diagnosticsTitle: "Mind insight",
+        };
 
   useEffect(() => {
     setChatModel(loadChatModel());
@@ -206,6 +226,7 @@ export default function ChatPage() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         startNewConversation();
@@ -311,6 +332,7 @@ export default function ChatPage() {
     setDriftResult(null);
     setLatestDriftResult(null);
     setDeveloperSnapshot(null);
+    setMobilePanel(null);
   }
 
   async function loadChatHistory(
@@ -688,6 +710,7 @@ export default function ChatPage() {
     setDriftResult(null);
     setLatestDriftResult(null);
     setDeveloperSnapshot(null);
+    setMobilePanel(null);
     loadChatHistory(session.agent_id, currentBranch, nextSessionId);
   }
 
@@ -712,22 +735,21 @@ export default function ChatPage() {
     setDriftResult(null);
     setLatestDriftResult(null);
     setDeveloperSnapshot(null);
+    setMobilePanel(null);
     loadChatSessions(session.agent_id, nextBranch);
   }
 
   if (!session) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
+      <main className="fixed inset-0 flex h-screen w-full items-center justify-center overflow-hidden bg-gray-50 px-6 pt-[65px]">
         <p className="text-sm text-gray-500">{copy.loading}</p>
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-50">
-      <div className="mx-auto w-full max-w-[1500px] px-3 py-4 sm:px-5">
-        <div className="flex min-h-[calc(100vh-89px)] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm lg:flex-row">
-          <aside className="flex w-full flex-col bg-gray-950 text-gray-100 md:w-[260px] md:shrink-0">
+    <main className="flex h-[calc(100dvh-65px)] min-h-0 w-full overflow-hidden bg-gray-50">
+      <aside className="hidden h-full w-64 flex-shrink-0 flex-col overflow-y-auto border-r border-gray-800 bg-gray-950 text-gray-100 lg:flex">
             <div className="border-b border-white/10 p-4">
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
                 {copy.sidebarTitle}
@@ -742,7 +764,7 @@ export default function ChatPage() {
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            <div className="p-3">
               <div className="mb-2 flex items-center justify-between px-1">
                 <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
                   {copy.history}
@@ -790,29 +812,29 @@ export default function ChatPage() {
                 </div>
               )}
             </div>
-          </aside>
+      </aside>
 
-          <div className="flex min-w-0 flex-1 flex-col">
-            <header className="border-b border-gray-200 bg-white px-5 py-4">
-              <div className="mx-auto w-full max-w-5xl space-y-4">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-gray-50">
+            <header className="hidden flex-shrink-0 border-b border-gray-200 bg-white px-5 py-4 lg:block">
+              <div className="mx-auto w-full max-w-5xl space-y-3 lg:space-y-4">
                 <div className="min-w-0">
                   <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
                     {copy.currentSession}
                   </p>
-                  <h1 className="mt-1 max-w-xl text-2xl font-bold tracking-tight text-gray-950">
+                  <h1 className="mt-1 max-w-xl text-xl font-bold tracking-tight text-gray-950 lg:text-2xl">
                     {copy.title}
                   </h1>
-                  <p className="mt-2 max-w-2xl text-sm leading-6 text-gray-500">
+                  <p className="mt-2 hidden max-w-2xl text-sm leading-6 text-gray-500 lg:block">
                     {copy.subtitle(session.agent_name ?? t.common.currentAgent)}
                   </p>
-                  <p className="mt-2 text-xs leading-5 text-gray-400">
+                  <p className="mt-1 truncate text-xs leading-5 text-gray-400 lg:mt-2">
                     {copy.branchLabel}: {currentBranch}
                     <span className="mx-2 text-gray-300">/</span>
                     {copy.currentConversation}: {currentSessionLabel}
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)_minmax(12rem,1fr)_auto] xl:items-end">
+                <div className="hidden grid-cols-1 gap-3 sm:grid-cols-2 lg:grid xl:grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)_minmax(12rem,1fr)_auto] xl:items-end">
                   <label className="block min-w-0">
                     <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                       {copy.currentTimeline}
@@ -899,24 +921,24 @@ export default function ChatPage() {
               </div>
             </header>
 
-            <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6">
-              {error ? (
-                <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {error}
-                </div>
-              ) : null}
-              {notice ? (
-                <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                  {notice}
-                </div>
-              ) : null}
+            <div
+              className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 sm:p-4"
+              ref={scrollContainerRef}
+            >
+              <div className="mx-auto flex w-full max-w-5xl flex-grow flex-col space-y-4">
+                {error ? (
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                    {error}
+                  </div>
+                ) : null}
+                {notice ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                    {notice}
+                  </div>
+                ) : null}
 
-              <section
-                className="min-h-0 flex-1 space-y-4 overflow-y-auto rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
-                ref={scrollContainerRef}
-              >
                 {isLoadingHistory ? (
-                  <div className="flex min-h-64 items-center justify-center text-center">
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-center">
                     <div>
                       <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-gray-200 border-t-purple-500" />
                       <p className="mt-3 text-sm font-medium text-gray-500">
@@ -925,7 +947,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                 ) : messages.length === 0 ? (
-                  <div className="flex min-h-64 items-center justify-center text-center">
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-center">
                     <div>
                       <p className="text-base font-semibold text-gray-900">
                         {copy.startTitle}
@@ -957,23 +979,259 @@ export default function ChatPage() {
                   </>
                 )}
                 <div ref={bottomRef} />
-              </section>
+              </div>
+            </div>
 
-              <form
-                className="mt-4 space-y-3 rounded-2xl border border-gray-200 bg-white/95 p-3 shadow-lg shadow-gray-200/70"
-                onSubmit={sendMessage}
+            <form
+              className="flex-shrink-0 border-t border-gray-200 bg-white/95 p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] shadow-[0_-10px_30px_rgba(15,23,42,0.06)] lg:p-4"
+              onSubmit={sendMessage}
+            >
+                <div className="mx-auto w-full max-w-5xl space-y-2 lg:space-y-3">
+                  <div className="hidden items-center justify-between gap-3 px-2 lg:flex">
+                    <label
+                      className="text-xs font-semibold uppercase tracking-wide text-gray-500"
+                      htmlFor="chat-model"
+                    >
+                      {copy.model}
+                    </label>
+                    <select
+                      className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      disabled={isSending}
+                      id="chat-model"
+                      onChange={(event) =>
+                        updateChatModel(event.target.value as ChatModelChoice)
+                      }
+                      value={chatModel}
+                    >
+                      <option value="fast">DeepSeek Chat</option>
+                      <option value="deep">DeepSeek V4 Pro</option>
+                    </select>
+                  </div>
+
+                  <div className="flex gap-2 lg:gap-3">
+                    <input
+                      className="min-w-0 flex-1 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100 lg:px-5"
+                      disabled={
+                        !session.agent_id ||
+                        !currentBranch ||
+                        !currentSessionId ||
+                        isSending ||
+                        Boolean(driftResult)
+                      }
+                      onChange={(event) => setInput(event.target.value)}
+                      placeholder={copy.placeholder}
+                      value={input}
+                    />
+                    <button
+                      className="shrink-0 rounded-full bg-gray-950 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 lg:px-5"
+                      disabled={
+                        !session.agent_id ||
+                        !currentBranch ||
+                        !currentSessionId ||
+                        isSending ||
+                        Boolean(driftResult) ||
+                        !input.trim()
+                      }
+                      type="submit"
+                    >
+                      {isSending ? t.common.sending : copy.send}
+                    </button>
+                  </div>
+                </div>
+            </form>
+            <div className="grid flex-shrink-0 grid-cols-3 border-t border-gray-200 bg-white text-xs font-semibold text-gray-600 lg:hidden">
+              <button
+                className="border-r border-gray-200 px-3 py-2.5 transition hover:bg-gray-50"
+                onClick={() => setMobilePanel("sessions")}
+                type="button"
               >
-                <div className="flex items-center justify-between gap-3 px-2">
-                  <label
-                    className="text-xs font-semibold uppercase tracking-wide text-gray-500"
-                    htmlFor="chat-model"
+                {mobilePanelCopy.sessions}
+              </button>
+              <button
+                className="border-r border-gray-200 px-3 py-2.5 transition hover:bg-gray-50"
+                onClick={() => setMobilePanel("settings")}
+                type="button"
+              >
+                {mobilePanelCopy.settings}
+              </button>
+              <button
+                className="px-3 py-2.5 transition hover:bg-gray-50"
+                onClick={() => setMobilePanel("diagnostics")}
+                type="button"
+              >
+                {mobilePanelCopy.diagnostics}
+              </button>
+            </div>
+      </div>
+      {isDeveloperPanelOpen ? (
+        <DeveloperPanel
+          currentBranch={currentBranch}
+          currentSessionLabel={currentSessionLabel}
+          currentTopic={currentTopic}
+          driftResult={latestDriftResult}
+          experimentMode={experimentMode}
+          isSending={isSending}
+          snapshot={developerSnapshot}
+        />
+      ) : null}
+      {mobilePanel ? (
+        <div className="fixed inset-0 z-50 flex items-end bg-gray-950/40 lg:hidden">
+          <button
+            aria-label="关闭面板"
+            className="absolute inset-0 cursor-default"
+            onClick={() => setMobilePanel(null)}
+            type="button"
+          />
+          <div className="relative max-h-[78dvh] w-full overflow-hidden rounded-t-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+              <h2 className="text-sm font-bold text-gray-950">
+                {mobilePanel === "sessions"
+                  ? mobilePanelCopy.sessionsTitle
+                  : mobilePanel === "settings"
+                    ? mobilePanelCopy.settingsTitle
+                    : mobilePanelCopy.diagnosticsTitle}
+              </h2>
+              <button
+                className="rounded-full border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-600 shadow-sm"
+                onClick={() => setMobilePanel(null)}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+
+            {mobilePanel === "sessions" ? (
+              <div className="max-h-[calc(78dvh-3.5rem)] overflow-y-auto p-4">
+                <button
+                  className="mb-4 w-full rounded-xl bg-gray-950 px-4 py-3 text-left text-sm font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!session.agent_id || isSending}
+                  onClick={() => startNewConversation()}
+                  type="button"
+                >
+                  {copy.newConversation}
+                </button>
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                    {copy.history}
+                  </p>
+                  <button
+                    className="text-xs font-semibold text-indigo-600 disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!session.agent_id || isLoadingSessions}
+                    onClick={() =>
+                      session.agent_id && loadChatSessions(session.agent_id)
+                    }
+                    type="button"
                   >
-                    {copy.model}
-                  </label>
+                    {isLoadingSessions ? t.common.loading : copy.refreshHistory}
+                  </button>
+                </div>
+                {chatSessions.length === 0 ? (
+                  <p className="rounded-xl bg-gray-50 px-3 py-4 text-sm text-gray-500">
+                    {copy.noSessions}
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {chatSessions.map((chatSession) => {
+                      const isActive =
+                        chatSession.session_id === currentSessionId;
+                      return (
+                        <button
+                          className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                            isActive
+                              ? "border-indigo-200 bg-indigo-50 text-indigo-950"
+                              : "border-gray-200 bg-white text-gray-700"
+                          }`}
+                          key={chatSession.session_id}
+                          onClick={() => openChatSession(chatSession.session_id)}
+                          type="button"
+                        >
+                          <span className="block truncate text-sm font-semibold">
+                            {chatSession.latest_message || copy.sessionUntitled}
+                          </span>
+                          <span className="mt-1 block text-xs text-gray-500">
+                            {formatFeedTime(chatSession.latest_timestamp)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {mobilePanel === "settings" ? (
+              <div className="max-h-[calc(78dvh-3.5rem)] space-y-4 overflow-y-auto p-4">
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {copy.currentTimeline}
+                  </span>
                   <select
-                    className="rounded-full border border-gray-200 bg-gray-50 px-4 py-2 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                    disabled={isLoadingBranches || isSending}
+                    onChange={(event) => updateCurrentBranch(event.target.value)}
+                    value={currentBranch}
+                  >
+                    {visibleTimelineBranches.map((branchId) => (
+                      <option key={branchId} value={branchId}>
+                        {branchId}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold text-gray-700 shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!session.agent_id || isLoadingBranches}
+                  onClick={() => session.agent_id && loadBranches(session.agent_id)}
+                  type="button"
+                >
+                  {isLoadingBranches ? t.common.loading : t.common.refreshBranches}
+                </button>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {copy.experimentMode}
+                  </span>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                    disabled={isSending || Boolean(driftResult)}
+                    onChange={(event) =>
+                      updateExperimentMode(
+                        event.target.value as ExperimentModeChoice,
+                      )
+                    }
+                    value={experimentMode}
+                  >
+                    <option value="mode_alpha">
+                      {copy.experimentModes.mode_alpha}
+                    </option>
+                    <option value="mode_beta">
+                      {copy.experimentModes.mode_beta}
+                    </option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {copy.currentTopic}
+                  </span>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                    disabled={isSending || Boolean(driftResult)}
+                    onChange={(event) => updateCurrentTopic(event.target.value)}
+                    value={currentTopic}
+                  >
+                    {CHAT_TOPICS.map((topic) => (
+                      <option key={topic} value={topic}>
+                        {(copy.topics as Record<string, string>)[topic] ?? topic}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    {copy.model}
+                  </span>
+                  <select
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
                     disabled={isSending}
-                    id="chat-model"
                     onChange={(event) =>
                       updateChatModel(event.target.value as ChatModelChoice)
                     }
@@ -982,53 +1240,26 @@ export default function ChatPage() {
                     <option value="fast">DeepSeek Chat</option>
                     <option value="deep">DeepSeek V4 Pro</option>
                   </select>
-                </div>
+                </label>
+              </div>
+            ) : null}
 
-                <div className="flex gap-3">
-                  <input
-                    className="min-w-0 flex-1 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-3 text-sm outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                    disabled={
-                      !session.agent_id ||
-                      !currentBranch ||
-                      !currentSessionId ||
-                      isSending ||
-                      Boolean(driftResult)
-                    }
-                    onChange={(event) => setInput(event.target.value)}
-                    placeholder={copy.placeholder}
-                    value={input}
-                  />
-                  <button
-                    className="rounded-full bg-gray-950 px-5 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={
-                      !session.agent_id ||
-                      !currentBranch ||
-                      !currentSessionId ||
-                      isSending ||
-                      Boolean(driftResult) ||
-                      !input.trim()
-                    }
-                    type="submit"
-                  >
-                    {isSending ? t.common.sending : copy.send}
-                  </button>
-                </div>
-              </form>
-            </div>
+            {mobilePanel === "diagnostics" ? (
+              <div className="max-h-[calc(78dvh-3.5rem)] overflow-y-auto">
+                <DeveloperPanelContent
+                  currentBranch={currentBranch}
+                  currentSessionLabel={currentSessionLabel}
+                  currentTopic={currentTopic}
+                  driftResult={latestDriftResult}
+                  experimentMode={experimentMode}
+                  isSending={isSending}
+                  snapshot={developerSnapshot}
+                />
+              </div>
+            ) : null}
           </div>
-          {isDeveloperPanelOpen ? (
-            <DeveloperPanel
-              currentBranch={currentBranch}
-              currentSessionLabel={currentSessionLabel}
-              currentTopic={currentTopic}
-              driftResult={latestDriftResult}
-              experimentMode={experimentMode}
-              isSending={isSending}
-              snapshot={developerSnapshot}
-            />
-          ) : null}
         </div>
-      </div>
+      ) : null}
       {driftResult ? (
         <CalibrationModal
           calibrationIdeal={calibrationIdeal}
@@ -1096,7 +1327,7 @@ function DeveloperPanel({
   const memories = snapshot?.memoryDiagnostics ?? [];
 
   return (
-    <aside className="flex w-full shrink-0 flex-col border-t border-gray-200 bg-gray-50 lg:w-[340px] lg:border-l lg:border-t-0">
+    <aside className="hidden h-full w-80 flex-shrink-0 flex-col overflow-y-auto border-l border-gray-200 bg-gray-50 xl:flex">
       <div className="border-b border-gray-200 bg-white px-4 py-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
           {copy.eyebrow}
@@ -1108,7 +1339,7 @@ function DeveloperPanel({
         </p>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+      <div className="space-y-4 p-4">
         <section className="rounded-lg border border-gray-200 bg-white p-3">
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
@@ -1181,6 +1412,122 @@ function DeveloperPanel({
         </section>
       </div>
     </aside>
+  );
+}
+
+function DeveloperPanelContent({
+  currentBranch,
+  currentSessionLabel,
+  currentTopic,
+  driftResult,
+  experimentMode,
+  isSending,
+  snapshot,
+}: {
+  currentBranch: string;
+  currentSessionLabel: string;
+  currentTopic: string;
+  driftResult: DriftCheckResponse | null;
+  experimentMode: ExperimentModeChoice;
+  isSending: boolean;
+  snapshot: DeveloperSnapshot | null;
+}) {
+  const { t } = useLanguage();
+  const copy = t.chat.developerTools;
+  const route =
+    snapshot?.queryRoute ??
+    (experimentMode === "mode_beta" ? "Static Baseline" : "Full IACL");
+  const probability =
+    driftResult?.drift_probability ?? snapshot?.driftProbability ?? null;
+  const risk = driftRiskTone(probability);
+  const memories = snapshot?.memoryDiagnostics ?? [];
+
+  return (
+    <>
+      <div className="border-b border-gray-200 bg-white px-4 py-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+          {copy.eyebrow}
+        </p>
+        <h2 className="mt-1 text-lg font-bold text-gray-950">{copy.title}</h2>
+        <p className="mt-2 text-xs leading-5 text-gray-500">
+          {currentBranch} / {currentSessionLabel} /{" "}
+          {(t.chat.topics as Record<string, string>)[currentTopic] ?? currentTopic}
+        </p>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {copy.route}
+            </span>
+            {isSending ? (
+              <span className="rounded-full bg-indigo-50 px-2 py-1 text-[11px] font-semibold text-indigo-600">
+                {copy.live}
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-2 text-sm font-semibold text-gray-950">{route}</p>
+          {snapshot?.lastQuery ? (
+            <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">
+              {snapshot.lastQuery}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              {copy.driftProbability}
+            </span>
+            <span className={`text-xs font-bold ${risk.text}`}>{risk.label}</span>
+          </div>
+          <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-100">
+            <div
+              className={`h-full rounded-full transition-all ${risk.bar}`}
+              style={{ width: `${risk.percent}%` }}
+            />
+          </div>
+          <p className={`mt-2 text-2xl font-bold ${risk.text}`}>
+            {probability === null || probability === undefined
+              ? "N/A"
+              : `${risk.percent}%`}
+          </p>
+          {driftResult?.reason || snapshot?.driftReason ? (
+            <p className="mt-2 text-xs leading-5 text-gray-500">
+              {driftResult?.reason ?? snapshot?.driftReason}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="rounded-lg border border-gray-200 bg-white p-3">
+          <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+            {copy.memories}
+          </span>
+          <div className="mt-3 space-y-2">
+            {memories.length > 0 ? (
+              memories.map((memory, index) => (
+                <article
+                  className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2"
+                  key={`${memory.kind}-${index}`}
+                >
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-gray-500">
+                    {copy.memoryKinds[memory.kind]}
+                  </p>
+                  <p className="mt-1 line-clamp-4 text-xs leading-5 text-gray-700">
+                    {memory.summary}
+                  </p>
+                </article>
+              ))
+            ) : (
+              <p className="rounded-lg border border-dashed border-gray-200 px-3 py-5 text-center text-xs text-gray-400">
+                {copy.noMemories}
+              </p>
+            )}
+          </div>
+        </section>
+      </div>
+    </>
   );
 }
 

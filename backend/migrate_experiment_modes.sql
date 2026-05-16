@@ -1,5 +1,5 @@
 -- Rename neutral experiment-mode labels for academic blind validation.
--- Run against backend/loop_research.db before the final MVP data collection.
+-- Run against the configured Postgres database before the final MVP data collection.
 
 BEGIN TRANSACTION;
 

@@ -13,6 +13,9 @@ export function NavBar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
   const isEnglish = language === "en";
+  const desktopNavClass = isEnglish ? "hidden xl:flex" : "hidden lg:flex";
+  const mobileNavClass = isEnglish ? "flex xl:hidden" : "flex lg:hidden";
+  const mobileMenuClass = isEnglish ? "xl:hidden" : "lg:hidden";
   const dailyItems = [
     { href: "/plaza", label: t.nav.plaza },
     { href: "/chat", label: t.nav.chat },
@@ -82,37 +85,19 @@ export function NavBar() {
         >
           Loop
         </Link>
-        <div className="hidden min-w-0 flex-1 items-center justify-end gap-2 lg:flex">
+        <div
+          className={`${desktopNavClass} min-w-0 flex-1 items-center justify-end gap-3`}
+        >
           <div className="flex min-w-0 flex-1 items-center justify-center">
-            <div
-              className={`flex min-w-0 items-center rounded-[28px] border border-gray-200 bg-gray-50/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] ${
-                isEnglish ? "gap-1.5 px-1.5 py-1.5" : "gap-2 px-2 py-1.5"
-              }`}
-            >
+            <div className="flex min-w-0 items-center gap-2 rounded-[28px] border border-gray-200 bg-gray-50/90 px-2 py-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
               {navGroups.map((group, index) => (
-                <div
-                  className={`flex min-w-0 items-center ${
-                    isEnglish ? "gap-1" : "gap-1.5"
-                  }`}
-                  key={group.label}
-                >
-                  <div
-                    className={`rounded-full bg-white font-semibold uppercase text-gray-400 shadow-sm ${
-                      isEnglish
-                        ? "px-2 py-1 text-[10px] tracking-[0.12em]"
-                        : "px-2.5 py-1 text-[11px] tracking-[0.14em]"
-                    }`}
-                  >
+                <div className="flex min-w-0 items-center gap-1.5" key={group.label}>
+                  <div className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-400 shadow-sm">
                     {group.label}
                   </div>
-                  <div
-                    className={`flex min-w-0 items-center ${
-                      isEnglish ? "gap-0.5" : "gap-1"
-                    }`}
-                  >
+                  <div className="flex min-w-0 items-center gap-1">
                     {group.items.map((item) => (
                       <NavLink
-                        compact={isEnglish}
                         href={item.href}
                         isActive={isActivePath(pathname, item.href)}
                         key={item.href}
@@ -121,22 +106,21 @@ export function NavBar() {
                     ))}
                   </div>
                   {index < navGroups.length - 1 ? (
-                    <div className={`${isEnglish ? "mx-0.5" : "mx-1"} h-6 w-px bg-gray-200`} />
+                    <div className="mx-1 h-6 w-px bg-gray-200" />
                   ) : null}
                 </div>
               ))}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-gray-200 bg-white/95 p-1 shadow-sm">
+          <div className="flex shrink-0 items-center gap-2 rounded-full border border-gray-200 bg-white/95 p-1 shadow-sm">
             <InviteFriendButton
-              compact={isEnglish}
               label={t.nav.inviteFriendBlindTest}
               onClick={copyEvaluationLink}
             />
             <LanguageToggle className="shrink-0" />
           </div>
         </div>
-        <div className="flex items-center gap-2 lg:hidden">
+        <div className={`${mobileNavClass} items-center gap-2`}>
           <LanguageToggle className="shrink-0" />
           <button
             aria-controls="mobile-nav-menu"
@@ -157,7 +141,7 @@ export function NavBar() {
       </div>
       {mobileMenuOpen ? (
         <div
-          className="border-t border-gray-200 bg-white px-4 py-4 shadow-sm lg:hidden"
+          className={`border-t border-gray-200 bg-white px-4 py-4 shadow-sm ${mobileMenuClass}`}
           id="mobile-nav-menu"
         >
           <div className="mx-auto grid max-w-7xl gap-4">
@@ -202,20 +186,16 @@ export function NavBar() {
 
 function InviteFriendButton({
   className = "",
-  compact = false,
   label,
   onClick,
 }: {
   className?: string;
-  compact?: boolean;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-full border border-emerald-200 bg-emerald-50 font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 hover:text-emerald-800 ${
-        compact ? "px-3.5 text-[13px]" : "px-4 text-sm"
-      } ${className}`}
+      className={`inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-full border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-700 shadow-sm transition hover:border-emerald-300 hover:bg-emerald-100 hover:text-emerald-800 ${className}`}
       onClick={onClick}
       type="button"
     >
@@ -225,13 +205,11 @@ function InviteFriendButton({
 }
 
 function NavLink({
-  compact = false,
   href,
   isActive,
   label,
   onClick,
 }: {
-  compact?: boolean;
   href: string;
   isActive: boolean;
   label: string;
@@ -239,9 +217,7 @@ function NavLink({
 }) {
   return (
     <Link
-      className={`whitespace-nowrap rounded-full font-medium transition ${
-        compact ? "px-2.5 py-1.5 text-[13px]" : "px-3 py-2 text-sm"
-      } ${
+      className={`whitespace-nowrap rounded-full px-3 py-2 text-sm font-medium transition ${
         isActive
           ? "bg-gray-950 text-white shadow-sm"
           : "text-gray-600 hover:bg-white hover:text-gray-950"

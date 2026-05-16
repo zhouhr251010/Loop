@@ -15,6 +15,7 @@ Loop 是一个面向计算社会科学实验的研究原型。它把真实参与
 - 一个 `User` 只对应一个 `Agent`；问卷提交会创建或刷新这个一对一映射。
 - 用户的长期身份目前主要落在两处：`autobiography` 和结构化 `core_memory`。
 - `core_memory` 现在不是三个字段了，规范键包括 `persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
+- 系统里现在还维护 system-owned NPC Agent。启动时会补一个默认 NPC，导入群聊时也可以按外部 sender 稳定创建 NPC；不要把这些 NPC 当成真实参与者。
 - 私聊已经不是“固定 prompt + 普通 RAG”而已。`mode_alpha` 是完整 IACL 路径，允许主动查记忆、读广场、改 Core Memory、更新内部状态；`mode_beta` 是静态 prompt 基线，用于盲测对照。
 - M1-M6 验证数据还包括每周 probe 问卷和人生反事实锚点。`/api/probes/*`、`/api/counterfactuals/*`、`ProbeResponse` 都是研究链路的一部分。
 - 每轮私聊同时受 `branch_id`、`session_id` 和 `topic` 隔离；读取历史、话题路由、漂移检测或导出分析时不要把不同上下文混在一起。
@@ -22,16 +23,18 @@ Loop 是一个面向计算社会科学实验的研究原型。它把真实参与
 - 用户纠错不会直接改写 `posts.content`。广场展示时会根据最新的 `FEEDBACK_CREATED` 事件覆盖显示文本。
 - 广场、聊天历史、事件时间线都必须分页，前后端的 `limit`/`skip` 保护是已经上线的核心架构，不是临时优化。
 - 前端正常情况下只和 `localhost:3000` 通信，再由 Next.js rewrite `/api/*` 到 `127.0.0.1:8001`。`/health` 目前是例外。
-- `backend/loop_research.db` 和 `chroma_db/` 都是实验运行态的一部分，不能提交，也不要随手删除。
+- RAG 基础设施已经不是本地向量库目录了。当前链路是 Postgres + pgvector 的 `rag_documents`、运行在 `127.0.0.1:7997/7998` 的 Infinity embedding/reranker 服务，以及可选的 Redis 限流。
+- `.env`、`model_cache/` 和 Postgres/Redis 对应的 Docker volume 都属于实验运行态，不要提交，也不要随手删除。
 
 ## 最高优先级规则
 
 - 不要打印、提交或泄露根目录 `.env` 里的任何密钥。
-- 不要提交 `backend/loop_research.db`，这是本地 SQLite 运行数据。
-- 不要提交 `chroma_db/`，这是本地向量数据库状态。
+- 不要提交数据库 dump 或运行态导出，它们可能包含实验数据。
+- 不要提交 `model_cache/`，这是 Infinity / Hugging Face 运行时缓存。
 - 不要提交 `frontend/node_modules/`、`frontend/.next/`、`frontend/npm-cache/`、`__pycache__/` 等依赖、缓存、构建产物。
 - 禁止批量删除文件或目录。确实需要删除时，每次最多删除 1 个明确绝对路径文件；如果需要清理多个文件，先停下来告诉用户。
 - 不要主动调用 `/api/admin/purge-branch` 这类破坏性清理接口，除非用户明确要求清理某个分支的数据。
+- 不要调用 `DELETE /api/agents/{agent_id}`，除非用户明确要求删除这个 Agent 及其关联痕迹。
 - 后端依赖不要装到全局 Python，使用已有 conda 环境 `Loop`。
 - 开发服务必须绑定 `127.0.0.1`，不要绑定 `0.0.0.0`。
 
@@ -43,7 +46,7 @@ Loop/
   backend/
     app/
       main.py                 FastAPI 入口、中间件、路由挂载、启动时建表
-      database.py             SQLAlchemy engine/session、SQLite 轻量升级
+      database.py             SQLAlchemy engine/session、Postgres/pgvector 初始化、RAG 表和触发器启动引导
       models.py               User/Agent/Post/ChatLog/EventLog/Relationship 等表
       security.py             bearer token、管理员 key、限流、请求大小、安全头
       routers/
@@ -58,12 +61,14 @@ Loop/
         simulate.py           管理员触发 Agent 自动发帖和 tick
         simulation.py         事件时间线、分支列表、时间机器 fork
         export.py             JSONL 研究数据导出
+        agents.py             Agent 删除等单体管理接口
       schemas/                Pydantic 输入输出模型
       crud/                   数据库增删查改封装
       services/
         llm_service.py        DeepSeek/OpenAI-compatible 生成发帖和私聊回复
         drift_detector.py     zero-shot 身份一致性漂移检测
-        rag_service.py        ChromaDB + BGE embedding/reranker 本地记忆检索
+        rag_service.py        Postgres/pgvector + Infinity 的记忆检索
+        infinity_client.py    Infinity embedding/reranker 共享异步 HTTP 客户端
         agent_graph.py        Agent 短期工作记忆与话题/状态图
         consolidation_service.py 睡眠式记忆巩固、高层反思、关系更新
         core_memory_service.py Core Memory 规范化和 prompt 格式化
@@ -72,6 +77,10 @@ Loop/
         time_machine.py       通过 EventLog 重放重建某分支状态
         feedback_service.py   用户纠错后的反思合并
         scoring_service.py    IPIP/PVQ 问卷计分与 core memory 合并
+        tools.py              私聊 Agent 可调用的工具层
+        npc_seed.py           系统 NPC / sender NPC 建种子
+        memory_watcher.py     私聊后后台抽取 durable 身份事实
+        agent_cleanup_service.py Agent 级联删除和痕迹清理
     requirements.txt
   frontend/
     next.config.mjs           /api/* 同源代理到 FastAPI
@@ -97,6 +106,7 @@ Loop/
       site-login/page.tsx     站点访问登录页
       site-login/SiteLoginForm.tsx 站点登录表单
       site-auth/login/route.ts 站点登录 route handler
+      layout.tsx              全局布局与 Provider 外壳
     src/lib/
       api.ts                  fetch 封装、类型定义、bearer token 注入
       i18n.ts                 useUiLanguage 轻量重导出
@@ -105,6 +115,9 @@ Loop/
       time.ts                 UTC 时间解析和展示
     src/data/questionnaires.json IPIP/PVQ probe 题目
     src/locales/dictionary.ts 中英 UI 文案字典
+  .env.example
+  docker-compose.infra.yml   Postgres / Redis / Infinity 基建编排
+  model_cache/               Infinity / Hugging Face 模型缓存
 ```
 
 ## 后端技术栈
@@ -112,15 +125,33 @@ Loop/
 - Python 3.10+
 - FastAPI + APIRouter
 - SQLAlchemy ORM
-- SQLite 本地数据库
+- PostgreSQL + pgvector 是必需项；未配置 Postgres 时启动直接失败
 - bcrypt 密码哈希
 - 自实现 HMAC 签名 bearer token
-- 内存限流、请求体大小限制、安全响应头和 Trusted Host 检查
+- 配置 `LOOP_REDIS_URL` 时使用 Redis 异步固定窗口限流；Redis 不可用时 fail-open 放行，同时保留请求体大小限制、安全响应头和 Trusted Host 检查
 - OpenAI Python SDK，`base_url` 指向 DeepSeek 兼容接口
 - python-dotenv 读取根目录 `.env`
-- ChromaDB 作为本地持久化向量库
-- sentence-transformers，默认 BGE 中文 embedding 和 reranker
+- Infinity HTTP 服务承载 BGE embedding 和 reranker
 - LangGraph/LangChain 相关依赖，用于 Agent 工作记忆和图式流程
+
+推荐本地启动顺序：
+
+```bash
+make infra
+make backend
+make frontend
+```
+
+`make infra` 会通过 `docker-compose.infra.yml` 启动 Postgres、Redis 和 Infinity embedding/reranker。
+
+模型缓存部署说明：
+
+- `model_cache/` 虽然被 `.gitignore` 忽略，但它是运行环境的一部分，因为 Infinity 会把它挂载为 `/app/.cache`。
+- 新服务器建议先预下载模型，再开始实验流程，避免首轮启动慢或超时：
+  1. `make infra`
+  2. `docker compose -f docker-compose.infra.yml up -d embedding reranker`
+  3. 首次执行一次 `make backend`，触发 `warm_up_rag_models()` 自动拉取并填充 `model_cache/`。
+- 多服务器快速部署时，建议从已预热机器用 `rsync` 拷贝 `model_cache/`，并保持该目录不入库。
 
 ## 后端运行
 
@@ -134,32 +165,37 @@ make backend
 http://localhost:8001/docs
 ```
 
-数据库文件：
+数据库：
 
 ```text
-/mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend/loop_research.db
+通过 POSTGRES_URL 或 POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB 连接 PostgreSQL
 ```
+
+没有本地数据库文件回退。
 
 ## 后端数据模型
 
 - `User`：实验参与者。保存用户名、密码哈希、创建时间、MBTI、Big Five、Schwartz 价值观、数字自传、结构化 core memory。
 - `User.core_memory` 规范字段：`persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
-- `Agent`：每个用户对应一个虚拟 Agent。保存 agent 名字和基础 system prompt。
+- `Agent`：每个用户对应一个虚拟 Agent，也包含 `is_npc=true` 的系统/NPC Agent。保存 agent 名字和基础 system prompt。
 - `Post`：Agent 在广场里产生的公开帖子。
 - `FeedbackLog`：用户对自己 Agent 帖子的纠错记录，是持续学习/后续微调的重要监督信号。
 - `ChatLog`：用户和 Agent 的私聊轮次，包含 `branch_id`、`session_id`、`topic`、`experiment_mode`。
 - `Evaluation`：外部盲测评价，保存评价人与被试关系、1-5 分真实性评分、文字反馈、抽样聊天 id。
 - `ProbeResponse`：M1-M6 验证 probe 回答，当前用于保存认证用户的 IPIP-120/PVQ-21 每周基线。
-- `EventLog`：append-only 事件时间线，用于时间机器、分支 feed、状态重放。SQLite 里有禁止 update/delete 的 trigger。
+- `EventLog`：append-only 事件时间线，用于时间机器、分支 feed、状态重放。Postgres 里有禁止 update/delete 的 trigger。
 - `Relationship`：Agent 到 Agent 的有向亲密度/关系分数。
 - `ReflectionEvent`：睡眠巩固时产生的分层反思节点。
 
 ## 后端核心机制
 
-- `main.py` 启动时执行 `Base.metadata.create_all()` 和 `ensure_sqlite_schema()`，所以轻量字段升级不需要删除数据库。
-- `security.py` 负责 bearer token、管理员 API key、请求大小限制、内存限流、安全响应头和 trusted host。
+- `main.py` 启动时执行 `Base.metadata.create_all()`，启用 `vector` 扩展，创建 `rag_documents` 表/索引，并安装 Postgres append-only trigger。
+- FastAPI lifespan 启动顺序是：`initialize_database()` -> `ensure_system_npc_agent()` -> `warm_up_rag_models()`。
+- `security.py` 负责 bearer token、管理员 API key、请求大小限制、Redis 异步限流、安全响应头和 trusted host。
 - 普通用户接口一般要求 `Authorization: Bearer <token>`。
 - 研究控制接口一般要求 `X-Loop-Admin-Key`，对应 `.env` 的 `LOOP_ADMIN_API_KEY`。
+- 如果没配 `LOOP_AUTH_SECRET`，bearer token 会退回到进程级临时 secret；后端重启后旧 session 会全部失效。
+- `backend/app/database.py` 会读取 `POSTGRES_URL`，或 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` 组合来连接 Postgres；没配 Postgres 会直接抛出 `RuntimeError` 阻止启动。
 - **架构黑科技 1：Agentic Memory / 主动寻址记忆已经是核心链路，不是普通 RAG 装饰。** Chat 生成路径允许 Agent 主动调用 `search_personal_memory`、`edit_core_memory`、`read_plaza_feed`、`get_current_time`、`check_energy_budget`、`update_internal_state` 等工具。用户说出长期身份事实、关系变化、稳定偏好或价值观时，Agent 必须用 `edit_core_memory` 写入 durable Core Memory；遇到需要回忆的问题时，用 `search_personal_memory` 定向进入 `retrieve_hybrid_memory()`，而不是把所有历史粗暴塞进 prompt。
 - `llm_service.py` 同时保留 tool-calling chat 和 fallback retrieval 路径，并通过 `historical_chat_loader` 按需翻页读取更早的分支/会话聊天历史。不要把它退化成一次性加载全部聊天记录。
 - `agent_graph.py` 把 `AGENT_TOOLS` 绑定进 LangGraph 流程，维护 active messages、emotion、energy、topic state 和 core-memory writeback。这是 Agent 运行时心智回路，后续改动必须保护。
@@ -170,8 +206,9 @@ http://localhost:8001/docs
 - zero-shot 身份漂移检测是 M1/M2 验证链路的一部分：`/api/chat/{agent_id}/check-drift` 会用最近会话回复对照身份核心，只有判定漂移时才追加 `DRIFT_DETECTED` 事件。
 - `EventLog` 是分支和时间机器的核心：帖子、聊天、反事实事件都会写入事件流。
 - `TimeMachine` 根据指定 `agent_id`、`branch_id`、时间点重放事件，重建当前 core memory、工作记忆、关系等状态。
-- FastAPI lifespan 会调用 `warm_up_rag_models()`；默认 `LOOP_RAG_PRELOAD=true` 时会预加载 Chroma/BGE/reranker，首次启动可能较慢。
-- RAG 记忆写入 `chroma_db/`，用 user/agent/branch 元数据隔离检索范围。
+- FastAPI lifespan 会调用 `warm_up_rag_models()`；默认 `LOOP_RAG_PRELOAD=true` 时会带锁和 TTL 地预热 Infinity embedding/reranker，避免多 worker 重复打爆模型加载。
+- Postgres 模式下启动会额外启用 `vector` extension，并创建 `rag_documents` 表及其 metadata/embedding 索引。
+- RAG 记忆现在写入 Postgres `rag_documents`，通过 user/agent/branch/topic 等 metadata 做隔离，不再依赖本地 `pgvector-backed `rag_documents`` 目录。
 - **架构黑科技 2：前端分页防爆机制已经上线。** Plaza、Chat、TimeMachine 三类可能无限增长的长列表都必须走 `skip`/`limit` 分页、`hasMore*` 状态和显式“加载更多”。保留 `PLAZA_PAGE_SIZE`、`CHAT_HISTORY_PAGE_SIZE`、`EVENT_PAGE_SIZE` 这类硬上限，不要回退成一次性拉取全部帖子、全部聊天或全部事件。
 - 后端列表接口也必须继续保留有界 `limit`：`/api/plaza/events`、`/api/posts`、`/api/agents/{agent_id}/chat`、`/api/agents/{agent_id}/events` 是长实验防爆边界。
 - `/api/admin/purge-branch` 是破坏性维护接口，只允许清理非 `main` 分支。它会删除该分支相关事件、帖子、聊天和纠错记录，并临时移除再恢复 `event_logs_no_delete` trigger。
@@ -182,9 +219,11 @@ http://localhost:8001/docs
 
 - `core_memory_service.py` 会把 `User.core_memory` 规范化为 4 个字段，不是 3 个。老数据可能没有 `communication_style`，所以读取前总是先 normalize。
 - `create_or_update_agent_for_user()` 不只是首次创建时才重要。用户重新提交问卷后，它会更新现有 `Agent.system_prompt_base`，并追加 `AGENT_PROFILE_UPDATED` 事件。
+- `ensure_system_npc_agent()` 会在启动时补一个默认系统 NPC；`/api/users/npc-agents/from-senders` 会按外部 sender_id 创建或复用稳定的 NPC Agent，供群聊导入映射。
 - `post_crud.create_post()` 和 `feedback_crud.create_feedback_log()` 都会同步追加 `EventLog`，分支广场显示是靠这些事件重建出来的。
 - 广场纠错是“投影覆盖”而不是“原地修改”：`FeedbackLog`/`FEEDBACK_CREATED` 记录保存改写结果，渲染 feed 时按分支找到最新纠错文本覆盖展示，`posts` 表原始内容仍保留。
 - `chat_crud.create_chat_log()` 保存聊天后还会追加带 `session_id`、`topic` 和 `experiment_mode` 的 `MESSAGE_RECEIVED` 事件；聊天历史页面读的是按分支/会话/话题过滤的有界 `ChatLog` 切片。
+- 私聊存储成功后，`extract_and_update_memory_background()` 还会在后台尝试从最新一轮对话里抽 durable 身份事实，并通过 `merge_core_memory_insight()` 写回 core memory。
 - `/api/chat/{agent_id}/sessions` 会按某个分支下的 `session_id` 汇总聊天会话，供聊天页侧边栏显示。
 - `DRIFT_DETECTED` 只在 `evaluate_drift_zero_shot()` 返回 `is_drifting=true` 后写入；模型不可用或跳过时不阻塞聊天保存。
 - `/api/evaluations/blind-test/{agent_id}` 是给外部评价者使用的公开接口，随机返回最多 5 条聊天样本；提交接口写入 `Evaluation`，不要求参与者 bearer token。
@@ -194,7 +233,8 @@ http://localhost:8001/docs
 - `TimeMachine` 故意不把回放出来的完整聊天文本塞进 prompt 状态，它主要重建的是 compact state：规范化 core memory、反事实覆盖、关系分数，以及一段短 `current_core_memory`。
 - `GET /api/agents/{agent_id}/events` 当前路由层只有 Agent 是否存在的检查和分页，没有强制 bearer 所有权或 admin 鉴权。实际使用时应把它视为内部研究接口，后续如果做外部部署需要补强。
 - `POST /api/simulation/fork` 现在支持传入 `source_branch_id` 和可选的 `source_event_id`，会校验事件是否属于该分支血统链，从源分支重建状态，并把 `from_branch_id` / `parent_event_id` 写进 fork payload 方便追溯。
-- `POST /api/agents/{agent_id}/import_chat` 现在写入向量记忆时仍固定使用 `branch_id=\"main\"`，但已经支持额外传一个批次级 `topic` 标签作为检索元数据。
+- `POST /api/agents/{agent_id}/import_chat` 现在写入 pgvector 记忆时仍固定使用 `branch_id=\"main\"`，但已经支持额外传一个批次级 `topic` 标签作为检索元数据。
+- `DELETE /api/agents/{agent_id}` 会硬删除该 Agent 的事件、聊天、帖子、纠错、关系、反思、评估和 pgvector 记忆；如果删的是 NPC Agent，还会把背后的系统 user 一并删掉。
 - 用户侧的记忆上传/搜索接口也没有暴露分支参数，所以目前向量记忆大体仍是主世界线视角；分支差异主要靠 `EventLog` + `TimeMachine`。
 - 关系加权的“个性化广场”逻辑已经落在 `post_crud.get_posts_for_viewer()` 和 `/api/agents/*/feed-preview` 两处，不要无意中把它们全部回退成纯时间倒序。
 
@@ -203,8 +243,8 @@ http://localhost:8001/docs
 这部分适合在你不知道“真实责任应该去哪找”时快速定位：
 
 - `backend/app/main.py`：FastAPI 组装、middleware、router 挂载、`.env` 读取、建表和可选 RAG 预热。
-- `backend/app/security.py`：bearer token、管理员 key、请求体大小限制、内存限流、安全响应头、trusted host。
-- `backend/app/database.py`：SQLAlchemy engine/session，以及 SQLite 的轻量 schema 升级和 `event_logs` append-only trigger。
+- `backend/app/security.py`：bearer token、管理员 key、请求体大小限制、Redis 异步限流、安全响应头、trusted host。
+- `backend/app/database.py`：SQLAlchemy engine/session、Postgres/pgvector 初始化、`rag_documents` 表/索引创建，以及 `event_logs` append-only trigger。
 - `backend/app/models.py`：核心研究数据模型，统一 second precision 时间戳。
 - `backend/app/services/event_store.py`：追加不可变 `EventLog` 的标准入口，负责 JSON-safe payload 和日志。
 - `backend/app/services/branching.py`：分支 id 规范化、分支存在性、全局分支列表、父分支 lineage 查询、fork 锚点推导。
@@ -213,8 +253,12 @@ http://localhost:8001/docs
 - `backend/app/services/tools.py`：Agent 在私聊中可调用的工具层。如果一个能力属于“Agent 主动感知/行动”，通常应放在这里。
 - `backend/app/services/agent_graph.py`：LangGraph 运行时心智回路，管理 working memory、topic summaries、emotion/energy 和工具绑定。
 - `backend/app/services/llm_service.py`：DeepSeek 请求参数、发帖生成、私聊生成、tool-calling 编排、fallback 路径、历史聊天按需加载。
+- `backend/app/services/npc_seed.py`：系统默认 NPC 建种子，以及按外部 sender 生成稳定 NPC Agent。
+- `backend/app/services/memory_watcher.py`：私聊结束后后台抽取 durable 身份事实并尝试并入 core memory。
+- `backend/app/services/agent_cleanup_service.py`：Agent 级联删除，包括 SQL 记录和 pgvector 记忆清理。
 - `backend/app/services/drift_detector.py`：zero-shot 身份一致性评估器，限制 prompt 上下文长度，并在 DeepSeek 不可用时安全跳过。
-- `backend/app/services/rag_service.py`：Chroma 持久化、BGE embedding/reranker、chunking、hybrid retrieval、预热与严格模式。
+- `backend/app/services/infinity_client.py`：Infinity embedding/reranker 的共享异步 HTTP 客户端，负责重试和退避。
+- `backend/app/services/rag_service.py`：Postgres/pgvector 持久化、Infinity embedding/reranker、chunking、hybrid retrieval、预热与严格模式。
 - `backend/app/services/scoring_service.py`：IPIP-NEO-120 和 PVQ-21 计分、兼容旧版聚合分数输入，并把问卷画像合并回 core memory。
 - `backend/app/services/consolidation_service.py`：过去 24 小时记录收集、睡眠式巩固、关系更新、episodic memory 写入、working memory 清空。
 - `backend/app/services/feedback_service.py`：帖子纠错后的反思与合并路径。
@@ -262,7 +306,7 @@ http://localhost:8001/docs
 
 ```text
 数字自传 / 记忆上传 / 群聊导入 / 私聊 / 帖子纠错
-  -> ChromaDB episodic chunks + User.core_memory + ChatLog/FeedbackLog
+  -> Postgres `rag_documents` + User.core_memory + ChatLog/FeedbackLog
   -> Agentic Memory 工具主动检索或更新目标记忆
   -> DeepSeek/tool-calling chat 或自动发帖使用分支状态 + 主动检索记忆
   -> sleep consolidation 和 feedback reflection 继续沉淀高层反思与关系分数
@@ -303,12 +347,14 @@ TimeMachine 在某个 EventLog 时间点重建 Agent 状态
 POST /api/users/register
 POST /api/users/login
 GET  /api/users/me
+POST /api/users/npc-agents/from-senders            管理员 key
 POST /api/users/me/questionnaire
 POST /api/users/{user_id}/questionnaire
 GET  /api/users/me/agent
 GET  /api/users/{user_id}/agent
 GET  /api/users/agent-choices                     管理员 key
 POST /api/users/agent-choices/{agent_id}/session  管理员 key
+DELETE /api/agents/{agent_id}                     owner bearer 或管理员 key，破坏性
 ```
 
 广场与反馈：
@@ -398,11 +444,42 @@ DEEPSEEK_THINKING=enabled
 DEEPSEEK_CHAT_THINKING=disabled
 DEEPSEEK_POST_THINKING=disabled
 DEEPSEEK_REASONING_EFFORT=high
-DEEPSEEK_CHAT_REASONING_EFFORT=high
-DEEPSEEK_POST_REASONING_EFFORT=high
 LOOP_CHAT_ENGINE=tool_calling
+LOOP_LLM_TIMEOUT_SECONDS=8
+LOOP_POST_LLM_TIMEOUT_SECONDS=20
+LOOP_CHAT_LLM_TIMEOUT_SECONDS=25
+LOOP_DEEP_CHAT_LLM_TIMEOUT_SECONDS=60
+LOOP_CHAT_MAX_TOKENS=600
+LOOP_DEEP_CHAT_MAX_TOKENS=1200
+LOOP_POST_MAX_TOKENS=360
+LOOP_VECTOR_RAG_ENABLED=true
+LOOP_RERANKER_ENABLED=true
+LOOP_RAG_STRICT=true
+LOOP_RAG_PRELOAD=true
+LOOP_EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5
+LOOP_RERANKER_MODEL=BAAI/bge-reranker-large
+LOOP_EMBEDDING_BASE_URL=http://127.0.0.1:7997
+LOOP_RERANKER_BASE_URL=http://127.0.0.1:7998
+LOOP_INFINITY_TIMEOUT_SECONDS=30
+LOOP_INFINITY_RETRIES=3
+LOOP_INFINITY_RETRY_BACKOFF_SECONDS=0.5
+LOOP_EMBEDDING_DIM=1024
+LOOP_CORE_MEMORY_INTENT_LLM_ENABLED=true
+LOOP_TOPIC_ROUTER_LLM_ENABLED=true
+LOOP_DRIFT_JUDGE_MODEL=deepseek-chat
+LOOP_DRIFT_JUDGE_TIMEOUT_SECONDS=12
+LOOP_DRIFT_JUDGE_MAX_TOKENS=360
+LOOP_DRIFT_JUDGE_THINKING=disabled
+LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
+LOOP_CONSOLIDATION_LLM_TIMEOUT_SECONDS=60
+LOOP_CONSOLIDATION_LLM_MAX_RETRIES=0
 LOOP_ADMIN_API_KEY=choose_a_private_admin_key
 LOOP_AUTH_SECRET=choose_a_stable_token_signing_secret
+POSTGRES_USER=loop_admin
+POSTGRES_PASSWORD=choose_a_private_postgres_password
+POSTGRES_DB=loop_research
+LOOP_REDIS_PASSWORD=choose_a_private_redis_password
+LOOP_REDIS_URL=redis://:password@127.0.0.1:6379/0
 LOOP_ACCESS_TOKEN_TTL_SECONDS=86400
 LOOP_MAX_REQUEST_BYTES=524288
 LOOP_RATE_LIMIT_REQUESTS=120
@@ -416,32 +493,9 @@ BASIC_AUTH_COOKIE_SECRET=choose_a_site_cookie_secret
 BASIC_AUTH_SESSION_SECONDS=43200
 ```
 
-可选 RAG/性能参数：
-
-```env
-LOOP_VECTOR_RAG_ENABLED=true
-LOOP_RERANKER_ENABLED=true
-LOOP_RAG_STRICT=true
-LOOP_RAG_PRELOAD=true
-LOOP_EMBEDDING_DEVICE=cuda:0
-LOOP_RERANKER_DEVICE=cuda:1
-LOOP_LLM_TIMEOUT_SECONDS=8
-LOOP_POST_LLM_TIMEOUT_SECONDS=20
-LOOP_CHAT_LLM_TIMEOUT_SECONDS=25
-LOOP_DEEP_CHAT_LLM_TIMEOUT_SECONDS=60
-LOOP_CHAT_MAX_TOKENS=900
-LOOP_DEEP_CHAT_MAX_TOKENS=1800
-LOOP_POST_MAX_TOKENS=360
-LOOP_CORE_MEMORY_INTENT_LLM_ENABLED=true
-LOOP_TOPIC_ROUTER_LLM_ENABLED=true
-LOOP_DRIFT_JUDGE_MODEL=deepseek-chat
-LOOP_DRIFT_JUDGE_TIMEOUT_SECONDS=12
-LOOP_DRIFT_JUDGE_MAX_TOKENS=360
-LOOP_DRIFT_JUDGE_THINKING=disabled
-LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
-```
-
 如果没有 `DEEPSEEK_API_KEY`，`/api/simulate/*` 自动发帖会显式失败并返回服务端错误，避免研究运行静默变成 Mock；私聊路径会尽量返回本地 memory-aware fallback；漂移检测会安全跳过并返回非阻塞提示；记忆/巩固路径根据具体服务可能 fallback 或 503。
+
+仓库里的 `.env.example` 现在更像一个“最小可启动基线”：它包含 `make infra` 需要的核心 Postgres / Redis 变量，但 Infinity 仍使用旧的 `INFINITY_EMBEDDING_URL` / `INFINITY_RERANKER_URL` 命名，也没有把上面那批可选调优参数全部展开。`rag_service.py` 同时兼容旧名和推荐的 `LOOP_EMBEDDING_BASE_URL` / `LOOP_RERANKER_BASE_URL`。
 
 私聊实验模式使用中性标签：`mode_alpha` 表示完整 active-memory/IACL 路径，`mode_beta` 表示静态 prompt 基线。旧别名 `full_iacl` 和 `static_prompt` 会在后端归一化到这两个标签。
 
@@ -455,7 +509,7 @@ LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
 - Next.js middleware：在进入应用页面前做站点级访问验证。
 - Route Handler：`src/app/site-auth/login/route.ts` 处理站点登录并设置 HTTP-only cookie。
 - 前端中英双语：`AppProviders` 注入 `LanguageProvider`，`LanguageToggle` 切换语言，文案集中在 `src/locales/dictionary.ts`，选择保存在 `loop_ui_language`。
-- `localStorage`：保存参与者 bearer token、用户 id、用户名、Agent id/name。
+- `localStorage`：保存参与者 bearer token、用户 id、用户名、Agent id/name，以及 `agent_is_npc`。
 
 ## 前端运行
 
@@ -590,7 +644,7 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 }
 ```
 
-页面会在浏览器端解析文件，支持按日期范围筛选，并为整批导入附加一个可选 topic 标签。随后统计 sender_id，让研究者把每个 sender 映射到已有 Agent id。映射完成后提交到 `/api/agents/me/import_chat`。后端会按目标 Agent 视角写入向量记忆，区分自己说的话和别人说的话。
+页面会在浏览器端解析文件，支持按日期范围筛选，并为整批导入附加一个可选 topic 标签。随后统计 sender_id，让研究者把每个 sender 映射到已有 Agent id；如果遇到还没有对应 Agent 的外部 sender，也可以带管理员 key 调 `/api/users/npc-agents/from-senders` 批量创建稳定 NPC 再继续映射。映射完成后提交到 `/api/agents/me/import_chat`。后端会按目标 Agent 视角写入向量记忆，区分自己说的话和别人说的话。
 
 ### `/memory` 记忆金库 / Memory Lab
 
@@ -650,9 +704,10 @@ fork 时需要提供：
 - 对所有 Agent 触发一次 tick：`POST /api/simulate/tick`
 - 导出 chatlogs JSONL：`GET /api/export/by-username/{username}/chatlogs`
 - 导出 feedbacks JSONL：`GET /api/export/by-username/{username}/feedbacks`
+- 删除单个 Agent 及其痕迹：`DELETE /api/agents/{agent_id}`
 - 危险区域清理非 `main` 分支数据：`POST /api/admin/purge-branch`
 
-这个页面的模拟、导出和分支清理功能都需要 `X-Loop-Admin-Key`。清理分支会删除运行数据且不可恢复，只应在明确需要丢弃某条实验分支时使用。
+这个页面的模拟、导出、Agent 删除和分支清理功能都需要 `X-Loop-Admin-Key`。删除 Agent 或清理分支都会移除运行数据且不可恢复，只应在明确知道后果时使用。
 
 ### `/site-login` 站点访问验证
 
@@ -697,25 +752,26 @@ BASIC_AUTH_SESSION_SECONDS=43200
 
 ## 典型完整测试流程
 
-1. 启动 FastAPI：`make backend`，监听 `127.0.0.1:8001`。
-2. 启动 Next.js：`make frontend`，监听 `127.0.0.1:3000`。
-3. 本地电脑通过 SSH tunnel 打开 `http://localhost:3000`。
-4. 如果启用了站点访问验证，先通过 `/site-login`。
-5. 注册或登录参与者账号。
-6. 填写问卷和数字自传，生成 Agent。
-7. 进入 `/plaza`。
-8. 在 `/lab` 输入管理员 key，触发 `simulate tick`。
-9. 回到 `/plaza`，确认帖子出现。
-10. 对自己的 Agent 帖子提交纠错。
-11. 进入 `/chat`，发送消息，确认 Agent 回复并保存历史。
-12. 在 `/chat` 新建一个会话，切换 `mode_alpha` / `mode_beta`，确认历史按会话隔离。
-13. 进入 `/probes`，提交当前 IPIP/PVQ probe，确认 Agent 画像仍可加载。
-14. 进入 `/counterfactuals`，提交一条人生反事实锚点，确认 memory 诊断中 core memory 有更新。
-15. 用新浏览器上下文打开 `/evaluations/{agent_id}`，提交一次盲测评分。
-16. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
-17. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
-18. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
-19. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
+1. 启动基建：`make infra`。
+2. 启动 FastAPI：`make backend`，监听 `127.0.0.1:8001`。
+3. 启动 Next.js：`make frontend`，监听 `127.0.0.1:3000`。
+4. 本地电脑通过 SSH tunnel 打开 `http://localhost:3000`。
+5. 如果启用了站点访问验证，先通过 `/site-login`。
+6. 注册或登录参与者账号。
+7. 填写问卷和数字自传，生成 Agent。
+8. 进入 `/plaza`。
+9. 在 `/lab` 输入管理员 key，触发 `simulate tick`。
+10. 回到 `/plaza`，确认帖子出现。
+11. 对自己的 Agent 帖子提交纠错。
+12. 进入 `/chat`，发送消息，确认 Agent 回复并保存历史。
+13. 在 `/chat` 新建一个会话，切换 `mode_alpha` / `mode_beta`，确认历史按会话隔离。
+14. 进入 `/probes`，提交当前 IPIP/PVQ probe，确认 Agent 画像仍可加载。
+15. 进入 `/counterfactuals`，提交一条人生反事实锚点，确认 memory 诊断中 core memory 有更新。
+16. 用新浏览器上下文打开 `/evaluations/{agent_id}`，提交一次盲测评分。
+17. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
+18. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
+19. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
+20. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
 
 ## 常用验证命令
 
@@ -767,8 +823,7 @@ git diff --cached --name-only
 
 - `.env`
 - `frontend/.env.local`
-- `backend/loop_research.db`
-- `chroma_db/`
+- `model_cache/`
 - `frontend/node_modules/`
 - `frontend/.next/`
 - `__pycache__/`

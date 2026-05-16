@@ -266,7 +266,7 @@ def get_plaza_events(
     response_model=FeedbackLogOut,
     status_code=status.HTTP_201_CREATED,
 )
-def create_post_feedback(
+async def create_post_feedback(
     post_id: int,
     feedback_in: FeedbackCreate,
     db: Session = Depends(get_db),
@@ -303,7 +303,7 @@ def create_post_feedback(
     feedback_in.branch_id = branch_id
     feedback_log = feedback_crud.create_feedback_log(db, db_post, feedback_in)
     try:
-        reflect_and_merge_feedback(
+        await reflect_and_merge_feedback(
             db,
             feedback_log=feedback_log,
             post=db_post,

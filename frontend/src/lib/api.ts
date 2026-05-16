@@ -18,6 +18,7 @@ export type Agent = {
   user_id: number;
   agent_name: string;
   system_prompt_base: string;
+  is_npc: boolean;
 };
 
 export type Post = {
@@ -118,6 +119,11 @@ export type MemoryConsolidationResponse = {
   graph_memory_cleared: boolean;
 };
 
+export type MemoryConsolidationAcceptedResponse = {
+  status: "processing";
+  message: string;
+};
+
 export type AgentWorkingMemoryState = {
   agent_id: number;
   branch_id: string;
@@ -162,6 +168,36 @@ export type AgentSessionChoice = {
   user: User;
   agent: Agent;
 };
+
+export type AgentDeletionResponse = {
+  agent_id: number;
+  agent_name: string;
+  user_id: number;
+  is_npc: boolean;
+  event_logs_deleted: number;
+  chat_logs_deleted: number;
+  vector_memories_deleted: number;
+  core_memory_cleared: boolean;
+  reflection_events_deleted: number;
+  relationships_deleted: number;
+  posts_deleted: number;
+  feedback_logs_deleted: number;
+  evaluations_deleted: number;
+  users_deleted: number;
+  message: string;
+};
+
+export type NpcAgentSenderSeedResult = AgentSessionChoice & {
+  sender_id: string;
+};
+
+export function formatAgentName(agent: Pick<Agent, "agent_name" | "is_npc">) {
+  return agent.is_npc ? `${agent.agent_name} [NPC]` : agent.agent_name;
+}
+
+export function formatAgentChoiceLabel(choice: AgentSessionChoice) {
+  return `@${choice.user.username} · ${formatAgentName(choice.agent)}`;
+}
 
 export async function apiRequest<T>(
   path: string,

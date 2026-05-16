@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +22,25 @@ from app.services.core_memory_service import DEFAULT_CORE_MEMORY, normalize_core
 logger = logging.getLogger(__name__)
 CURRENT_CORE_MEMORY_FIELD_CHARS = 800
 CURRENT_CORE_MEMORY_MAX_CHARS = 2400
+STATE_CACHE_MAX_ENTRIES = 256
+_state_cache: OrderedDict[tuple[int, str, int], dict[str, Any]] = OrderedDict()
+
+
+def _cache_get(key: tuple[int, str, int], target_timestamp: datetime) -> dict[str, Any] | None:
+    cached = _state_cache.get(key)
+    if cached is None:
+        return None
+    _state_cache.move_to_end(key)
+    state = deepcopy(cached)
+    state["target_timestamp"] = target_timestamp
+    return state
+
+
+def _cache_set(key: tuple[int, str, int], state: dict[str, Any]) -> None:
+    _state_cache[key] = deepcopy(state)
+    _state_cache.move_to_end(key)
+    while len(_state_cache) > STATE_CACHE_MAX_ENTRIES:
+        _state_cache.popitem(last=False)
 
 
 class TimeMachine:
@@ -43,6 +64,18 @@ class TimeMachine:
         """
         normalized_branch = normalize_branch_id(branch_id)
         target_timestamp = self._coerce_timestamp(target_timestamp)
+        cache_key = self._cache_key(agent_id, normalized_branch, target_timestamp)
+        if cache_key is not None:
+            cached_state = _cache_get(cache_key, target_timestamp)
+            if cached_state is not None:
+                logger.debug(
+                    "[Time Machine] Cache hit for Agent %s on branch %s at watermark %s.",
+                    agent_id,
+                    normalized_branch,
+                    cache_key[2],
+                )
+                return cached_state
+
         visited_branches = set(_visited_branches or set())
         if normalized_branch in visited_branches:
             logger.warning(
@@ -99,7 +132,30 @@ class TimeMachine:
             f"{target_timestamp} on branch {normalized_branch}. "
             f"Replayed {count} events.",
         )
+        if cache_key is not None:
+            _cache_set(cache_key, state)
         return state
+
+    def _cache_key(
+        self,
+        agent_id: int,
+        branch_id: str,
+        target_timestamp: datetime,
+    ) -> tuple[int, str, int] | None:
+        if branch_id != DEFAULT_BRANCH_ID:
+            return None
+        latest_event = (
+            self.db.query(models.EventLog.event_id)
+            .filter(
+                models.EventLog.agent_id == agent_id,
+                models.EventLog.branch_id == branch_id,
+                models.EventLog.timestamp <= target_timestamp,
+            )
+            .order_by(models.EventLog.event_id.desc())
+            .first()
+        )
+        latest_event_id = int(latest_event[0]) if latest_event else 0
+        return (agent_id, branch_id, latest_event_id)
 
     def _coerce_timestamp(self, value: datetime) -> datetime:
         if value.tzinfo is not None:

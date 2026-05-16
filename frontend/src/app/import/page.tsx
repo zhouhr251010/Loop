@@ -8,7 +8,9 @@ import {
   AgentSessionChoice,
   ChatImportResponse,
   ImportedChatMessage,
+  NpcAgentSenderSeedResult,
   apiRequest,
+  formatAgentChoiceLabel,
 } from "@/lib/api";
 import { LoopSession, loadSession, saveSession } from "@/lib/session";
 
@@ -273,6 +275,7 @@ function ChatImportView() {
   const [isParsing, setIsParsing] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
+  const [isCreatingNpcs, setIsCreatingNpcs] = useState(false);
 
   useEffect(() => {
     async function bootstrap() {
@@ -288,6 +291,7 @@ function ChatImportView() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
@@ -354,14 +358,31 @@ function ChatImportView() {
     if (session?.agent_id) {
       labels.set(
         session.agent_id,
-        `@${session.username} · ${session.agent_name ?? copy.currentAgent}`,
+        `@${session.username} · ${
+          session.agent_is_npc
+            ? `${session.agent_name ?? copy.currentAgent} [NPC]`
+            : session.agent_name ?? copy.currentAgent
+        }`,
       );
     }
     for (const choice of agentChoices) {
-      labels.set(choice.agent.id, `@${choice.user.username} · ${choice.agent.agent_name}`);
+      labels.set(choice.agent.id, formatAgentChoiceLabel(choice));
     }
     return labels;
   }, [agentChoices, session]);
+  const selectableAgentChoices = useMemo(
+    () =>
+      agentChoices.filter((choice) => choice.agent.id !== session?.agent_id),
+    [agentChoices, session?.agent_id],
+  );
+  const unmappedSenderIds = useMemo(
+    () =>
+      senderIds.filter((senderId) => {
+        const mappedAgentId = Number(senderMap[senderId]);
+        return !Number.isInteger(mappedAgentId) || mappedAgentId <= 0;
+      }),
+    [senderIds, senderMap],
+  );
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -460,6 +481,60 @@ function ChatImportView() {
       setError(err instanceof Error ? err.message : copy.loadAgentsFailed);
     } finally {
       setIsLoadingAgents(false);
+    }
+  }
+
+  async function createNpcAgentsForUnmappedSenders() {
+    const trimmedAdminKey = adminKey.trim();
+    if (!trimmedAdminKey) {
+      setError(copy.adminRequired);
+      return;
+    }
+    if (unmappedSenderIds.length === 0) {
+      return;
+    }
+
+    setError("");
+    setIsCreatingNpcs(true);
+    try {
+      const createdChoices = await apiRequest<NpcAgentSenderSeedResult[]>(
+        "/api/users/npc-agents/from-senders",
+        {
+          method: "POST",
+          headers: {
+            "X-Loop-Admin-Key": trimmedAdminKey,
+          },
+          body: JSON.stringify({
+            sender_ids: unmappedSenderIds,
+          }),
+        },
+      );
+      setAgentChoices((currentChoices) => {
+        const choicesByAgentId = new Map<number, AgentSessionChoice>();
+        for (const choice of [...createdChoices, ...currentChoices]) {
+          choicesByAgentId.set(choice.agent.id, {
+            user: choice.user,
+            agent: choice.agent,
+          });
+        }
+        return Array.from(choicesByAgentId.values()).sort((left, right) => {
+          if (left.agent.is_npc !== right.agent.is_npc) {
+            return left.agent.is_npc ? -1 : 1;
+          }
+          return left.agent.id - right.agent.id;
+        });
+      });
+      setSenderMap((currentMap) => {
+        const nextMap = { ...currentMap };
+        for (const choice of createdChoices) {
+          nextMap[choice.sender_id] = String(choice.agent.id);
+        }
+        return nextMap;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.createNpcsFailed);
+    } finally {
+      setIsCreatingNpcs(false);
     }
   }
 
@@ -656,6 +731,20 @@ function ChatImportView() {
                   >
                     {isLoadingAgents ? t.common.loading : copy.loadAgents}
                   </button>
+                  <button
+                    className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={
+                      isCreatingNpcs ||
+                      isParsing ||
+                      unmappedSenderIds.length === 0
+                    }
+                    onClick={createNpcAgentsForUnmappedSenders}
+                    type="button"
+                  >
+                    {isCreatingNpcs
+                      ? copy.creatingNpcs
+                      : copy.createNpcs(unmappedSenderIds.length)}
+                  </button>
                 </div>
               </div>
               <div className="mt-3 overflow-hidden rounded-xl border border-gray-200">
@@ -688,15 +777,17 @@ function ChatImportView() {
                               {session.agent_id ? (
                                 <option value={session.agent_id}>
                                   @{session.username} ·{" "}
-                                  {session.agent_name ?? copy.currentAgent}
+                                  {session.agent_is_npc
+                                    ? `${session.agent_name ?? copy.currentAgent} [NPC]`
+                                    : session.agent_name ?? copy.currentAgent}
                                 </option>
                               ) : null}
-                              {agentChoices.map((choice) => (
+                              {selectableAgentChoices.map((choice) => (
                                 <option
                                   key={choice.agent.id}
                                   value={choice.agent.id}
                                 >
-                                  @{choice.user.username} · {choice.agent.agent_name}
+                                  {formatAgentChoiceLabel(choice)}
                                 </option>
                               ))}
                             </select>

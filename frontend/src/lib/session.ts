@@ -7,6 +7,7 @@ export type LoopSession = {
   token_expires_at?: number;
   agent_id?: number;
   agent_name?: string;
+  agent_is_npc?: boolean;
 };
 
 const SESSION_KEY = "loop_session";

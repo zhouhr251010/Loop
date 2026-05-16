@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -12,11 +11,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 from app.services.llm_service import (
-    DEEPSEEK_BASE_URL,
     DEFAULT_CHAT_MODEL,
     DEFAULT_CHAT_REASONING_EFFORT,
     DEFAULT_CHAT_THINKING_MODE,
     PROJECT_ROOT,
+    build_async_deepseek_client,
     _deepseek_request_options,
 )
 
@@ -113,7 +112,10 @@ def _build_drift_judge_prompt(
     )
 
 
-def _call_drift_judge(recent_messages: list[str], identity_core: str) -> dict[str, Any]:
+async def _call_drift_judge(
+    recent_messages: list[str],
+    identity_core: str,
+) -> dict[str, Any]:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         return {
@@ -123,36 +125,39 @@ def _call_drift_judge(recent_messages: list[str], identity_core: str) -> dict[st
             "reason": "Drift judge skipped because DEEPSEEK_API_KEY is not configured.",
         }
 
-    from openai import OpenAI
-
-    client = OpenAI(
+    async_client = build_async_deepseek_client(
         api_key=api_key,
-        base_url=DEEPSEEK_BASE_URL,
-        timeout=DEFAULT_DRIFT_JUDGE_TIMEOUT_SECONDS,
+        timeout_seconds=DEFAULT_DRIFT_JUDGE_TIMEOUT_SECONDS,
     )
-    response = client.chat.completions.create(
-        model=os.getenv("LOOP_DRIFT_JUDGE_MODEL", DEFAULT_CHAT_MODEL),
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a JSON-only identity consistency judge. "
-                    "Do not include markdown, prose, or code fences."
+    try:
+        response = await async_client.chat.completions.create(
+            model=os.getenv("LOOP_DRIFT_JUDGE_MODEL", DEFAULT_CHAT_MODEL),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a JSON-only identity consistency judge. "
+                        "Do not include markdown, prose, or code fences."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": _build_drift_judge_prompt(recent_messages, identity_core),
+                },
+            ],
+            max_tokens=DEFAULT_DRIFT_JUDGE_MAX_TOKENS,
+            **_deepseek_request_options(
+                os.getenv("LOOP_DRIFT_JUDGE_THINKING", DEFAULT_CHAT_THINKING_MODE),
+                os.getenv(
+                    "LOOP_DRIFT_JUDGE_REASONING_EFFORT",
+                    DEFAULT_CHAT_REASONING_EFFORT,
                 ),
-            },
-            {
-                "role": "user",
-                "content": _build_drift_judge_prompt(recent_messages, identity_core),
-            },
-        ],
-        max_tokens=DEFAULT_DRIFT_JUDGE_MAX_TOKENS,
-        **_deepseek_request_options(
-            os.getenv("LOOP_DRIFT_JUDGE_THINKING", DEFAULT_CHAT_THINKING_MODE),
-            os.getenv("LOOP_DRIFT_JUDGE_REASONING_EFFORT", DEFAULT_CHAT_REASONING_EFFORT),
-        ),
-    )
-    raw_text = (response.choices[0].message.content or "").strip()
-    return _coerce_result(_extract_json_object(raw_text))
+            ),
+        )
+        raw_text = (response.choices[0].message.content or "").strip()
+        return _coerce_result(_extract_json_object(raw_text))
+    finally:
+        await async_client.close()
 
 
 async def evaluate_drift_zero_shot(
@@ -161,11 +166,7 @@ async def evaluate_drift_zero_shot(
 ) -> dict[str, Any]:
     """Evaluate identity drift through the configured LLM as a zero-shot judge."""
     try:
-        return await asyncio.to_thread(
-            _call_drift_judge,
-            recent_messages,
-            identity_core,
-        )
+        return await _call_drift_judge(recent_messages, identity_core)
     except Exception as exc:
         logger.warning(
             "[DriftDetector] zero-shot judge failed: %s: %s",

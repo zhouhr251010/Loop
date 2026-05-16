@@ -62,6 +62,7 @@ def format_core_memory_for_prompt(value: Any) -> str:
         f"current_goals: {prompt_memory['current_goals'] or '暂无'}\n"
         f"communication_style: {prompt_memory['communication_style'] or '暂无'}\n"
         "这些内容是你的稳定自我认知，优先级高于 RAG 检索片段和短期上下文。"
+        "请自然体现这些长期身份材料，保持同一个人的连续感。"
     )
 
 
@@ -117,6 +118,11 @@ def merge_core_memory_insight(
     db: Session,
     user_id: int,
     insight: str,
+    *,
+    agent_id: int | None = None,
+    branch_id: str = "main",
+    source: str = "sleep_consolidation",
+    persist_user_core_memory: bool = True,
 ) -> dict[str, str]:
     """Append a high-level reflection into persona core memory."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -129,24 +135,30 @@ def merge_core_memory_insight(
         return core_memory
 
     existing = core_memory["persona_traits"].strip()
+    if clean_insight in existing:
+        return core_memory
+
     if existing:
         core_memory["persona_traits"] = f"{existing}\n- {clean_insight}"[-8000:]
     else:
         core_memory["persona_traits"] = f"- {clean_insight}"[-8000:]
 
     timestamp = utc_now_seconds()
-    user.core_memory = core_memory
-    if user.agent is not None:
+    if persist_user_core_memory:
+        user.core_memory = core_memory
+    target_agent_id = agent_id or (user.agent.id if user.agent is not None else None)
+    if target_agent_id is not None:
         append_event(
             db,
-            agent_id=user.agent.id,
+            agent_id=target_agent_id,
+            branch_id=(branch_id or "main").strip() or "main",
             event_type="CORE_MEMORY_UPDATED",
             payload={
                 "key": "persona_traits",
                 "new_value": core_memory["persona_traits"],
                 "insight": clean_insight,
                 "core_memory": core_memory,
-                "source": "sleep_consolidation",
+                "source": source,
             },
             timestamp=timestamp,
             commit=False,

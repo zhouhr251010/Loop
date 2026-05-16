@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: loop_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: loop_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: loop_research
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - loop_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: loop_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${LOOP_REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - loop_redis_data:/data
+
+  embedding:
+    image: michaelf34/infinity:latest
+    container_name: loop-infinity-embed
+    restart: always
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+      - HF_HOME=/app/.cache/huggingface
+    command: v2 --model-id BAAI/bge-large-zh-v1.5 --port 7997
+    ports:
+      - "127.0.0.1:7997:7997"
+    volumes:
+      - ./model_cache:/app/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2'] # 严格绑定 GPU 2
+              capabilities: [gpu]
+
+  reranker:
+    image: michaelf34/infinity:latest
+    container_name: loop-infinity-rerank
+    restart: always
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+      - HF_HOME=/app/.cache/huggingface
+    command: v2 --model-id BAAI/bge-reranker-large --port 7998
+    ports:
+      - "127.0.0.1:7998:7998"
+    volumes:
+      - ./model_cache:/app/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['3'] # 严格绑定 GPU 3
+              capabilities: [gpu]
+
+volumes:
+  loop_postgres_data:
+  loop_redis_data:

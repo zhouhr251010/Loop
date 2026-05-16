@@ -21,11 +21,10 @@ from app.services.branching import (
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 EVENT_LOG_DELETE_TRIGGER_SQL = """
-CREATE TRIGGER IF NOT EXISTS event_logs_no_delete
+CREATE TRIGGER event_logs_no_delete
 BEFORE DELETE ON event_logs
-BEGIN
-    SELECT RAISE(ABORT, 'event_logs are append-only');
-END
+FOR EACH ROW
+EXECUTE FUNCTION prevent_event_logs_mutation()
 """
 
 
@@ -85,6 +84,11 @@ def _count_records_by_ids(
     if not ids:
         return 0
     return db.query(model).filter(model.id.in_(ids)).count()
+
+
+def _restore_event_log_delete_trigger(db: Session) -> None:
+    db.execute(text("DROP TRIGGER IF EXISTS event_logs_no_delete ON event_logs"))
+    db.execute(text(EVENT_LOG_DELETE_TRIGGER_SQL))
 
 
 @router.post(
@@ -161,17 +165,17 @@ def purge_branch(
     )
 
     try:
-        db.execute(text("DROP TRIGGER IF EXISTS event_logs_no_delete"))
+        db.execute(text("DROP TRIGGER IF EXISTS event_logs_no_delete ON event_logs"))
         events_deleted = (
             db.query(models.EventLog)
             .filter(models.EventLog.branch_id == branch_id)
             .delete(synchronize_session=False)
         )
-        db.execute(text(EVENT_LOG_DELETE_TRIGGER_SQL))
+        _restore_event_log_delete_trigger(db)
         db.commit()
     except Exception:
         db.rollback()
-        db.execute(text(EVENT_LOG_DELETE_TRIGGER_SQL))
+        _restore_event_log_delete_trigger(db)
         db.commit()
         raise
 

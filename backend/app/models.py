@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import (
+    Boolean,
     JSON,
     Column,
     DateTime,
@@ -79,6 +80,7 @@ class Agent(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     agent_name = Column(String(128), nullable=False)
     system_prompt_base = Column(Text, nullable=False)
+    is_npc = Column(Boolean, default=False, nullable=False, index=True)
 
     user = relationship("User", back_populates="agent")
     posts = relationship("Post", back_populates="agent")

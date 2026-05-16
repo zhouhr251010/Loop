@@ -56,6 +56,13 @@ class MemoryConsolidationOut(BaseModel):
     graph_memory_cleared: bool
 
 
+class MemoryConsolidationAcceptedOut(BaseModel):
+    """Response returned once sleep consolidation is queued."""
+
+    status: str
+    message: str
+
+
 class AgentWorkingMemoryOut(BaseModel):
     """Inspectable short-term LangGraph memory state for one Agent."""
 

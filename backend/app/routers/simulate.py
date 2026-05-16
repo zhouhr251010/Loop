@@ -20,7 +20,11 @@ router = APIRouter(prefix="/api/simulate", tags=["simulation"])
 logger = logging.getLogger(__name__)
 
 
-def _simulate_agent_post(db: Session, agent: Agent, branch_id: str = "main") -> PostOut:
+async def _simulate_agent_post(
+    db: Session,
+    agent: Agent,
+    branch_id: str = "main",
+) -> PostOut:
     """Generate and persist one simulated post for an agent."""
     normalized_branch_id = normalize_branch_id(branch_id)
     if not branch_exists(db, normalized_branch_id):
@@ -39,7 +43,7 @@ def _simulate_agent_post(db: Session, agent: Agent, branch_id: str = "main") -> 
     ).strip()
 
     try:
-        generated_content = generate_agent_post(
+        generated_content = await generate_agent_post(
             agent.user,
             branch_id=normalized_branch_id,
             reconstructed_core_memory=reconstructed_core_memory,
@@ -72,7 +76,7 @@ def _simulate_agent_post(db: Session, agent: Agent, branch_id: str = "main") -> 
     response_model=PostOut,
     status_code=status.HTTP_201_CREATED,
 )
-def simulate_single_agent_post(
+async def simulate_single_agent_post(
     agent_id: int,
     branch_id: str = "main",
     db: Session = Depends(get_db),
@@ -86,7 +90,7 @@ def simulate_single_agent_post(
             detail="Agent not found.",
         )
 
-    return _simulate_agent_post(db, db_agent, branch_id)
+    return await _simulate_agent_post(db, db_agent, branch_id)
 
 
 @router.post(
@@ -94,7 +98,7 @@ def simulate_single_agent_post(
     response_model=PostOut,
     status_code=status.HTTP_201_CREATED,
 )
-def simulate_user_agent_post(
+async def simulate_user_agent_post(
     username: str,
     branch_id: str = "main",
     db: Session = Depends(get_db),
@@ -108,7 +112,7 @@ def simulate_user_agent_post(
             detail="Agent not found for this username.",
         )
 
-    return _simulate_agent_post(db, db_agent, branch_id)
+    return await _simulate_agent_post(db, db_agent, branch_id)
 
 
 @router.post(
@@ -116,11 +120,14 @@ def simulate_user_agent_post(
     response_model=list[PostOut],
     status_code=status.HTTP_201_CREATED,
 )
-def simulate_tick(
+async def simulate_tick(
     branch_id: str = "main",
     db: Session = Depends(get_db),
     _admin_key: None = Depends(require_admin_key),
 ) -> list[PostOut]:
     """Advance the simulation clock by asking every agent to publish one post."""
-    agents = agent_crud.get_agents(db)
-    return [_simulate_agent_post(db, agent, branch_id) for agent in agents]
+    agents = agent_crud.get_agents(db, include_npc=False)
+    posts: list[PostOut] = []
+    for agent in agents:
+        posts.append(await _simulate_agent_post(db, agent, branch_id))
+    return posts

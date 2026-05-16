@@ -24,6 +24,18 @@ chroma_db/
 *.sqlite
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlitedb
+*.db.bak
+*.sqlite.bak
+*.sqlite3.bak
+*.dump
+model_cache/
 
 # Node and Next.js
 node_modules/
@@ -37,5 +49,7 @@ frontend/tsconfig.tsbuildinfo
 # Logs and local OS/editor files
 *.log
 启动.txt
+性能与安全考虑.txt
+性能与安全性考虑.txt
 .DS_Store
 Thumbs.db

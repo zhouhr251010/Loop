@@ -3,7 +3,13 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLanguage } from "@/components/LanguageContext";
-import { Agent, AgentSessionChoice, apiRequest } from "@/lib/api";
+import {
+  Agent,
+  AgentSessionChoice,
+  apiRequest,
+  formatAgentChoiceLabel,
+  formatAgentName,
+} from "@/lib/api";
 import type { Dictionary } from "@/locales/dictionary";
 import { LoopSession, loadSession, saveSession } from "@/lib/session";
 import { formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
@@ -106,7 +112,11 @@ export function TimeMachinePanel() {
 
       setSession(storedSession);
       setTargetAgentId(storedSession.agent_id ?? null);
-      setTargetAgentLabel(storedSession.agent_name ?? storedSession.username);
+      setTargetAgentLabel(
+        storedSession.agent_is_npc && storedSession.agent_name
+          ? `${storedSession.agent_name} [NPC]`
+          : storedSession.agent_name ?? storedSession.username,
+      );
 
       if (storedSession.agent_id) {
         setIsBootstrapping(false);
@@ -119,6 +129,7 @@ export function TimeMachinePanel() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
@@ -291,7 +302,7 @@ export function TimeMachinePanel() {
     setTargetAgentId(numericAgentId);
     setTargetAgentLabel(
       choice
-        ? `${choice.agent.agent_name} / @${choice.user.username}`
+        ? `${formatAgentName(choice.agent)} / @${choice.user.username}`
         : `Agent #${numericAgentId}`,
     );
     setSelectedBranch("main");
@@ -469,7 +480,7 @@ export function TimeMachinePanel() {
                 )}
                 {agentChoices.map((choice) => (
                   <option key={choice.agent.id} value={choice.agent.id}>
-                    {choice.agent.agent_name} / @{choice.user.username}
+                    {formatAgentChoiceLabel(choice)}
                   </option>
                 ))}
               </select>

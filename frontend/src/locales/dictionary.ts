@@ -183,12 +183,27 @@ export const dictionary = {
       noAgentForSession: "当前会话还没有 Agent。",
       loadedChoices: (count: number) => `已加载 ${count} 个 Agent 选项。`,
       loadAgentsFailed: "加载 Agent 失败。",
+      agentManagement: "Agent 列表与销毁",
+      agentManagementDescription:
+        "查看已加载 Agent，并对不再需要的 Agent/NPC 执行级联删除。",
+      deleteAgent: "删除",
+      deletingAgent: "删除中...",
+      confirmDeleteAgent: "永久删除",
+      deleteAgentDanger: "危险操作",
+      deleteAgentTitle: "删除这个 Agent？",
+      deleteAgentConfirm:
+        "此操作将永久抹除该 Agent 及其所有记忆和历史事件，不可恢复。确定吗？",
+      deleteAgentFailed: "Agent 删除失败。",
+      agentDeleted: (agentName: string, agentId: number) =>
+        `已删除 ${agentName}（Agent #${agentId}）。`,
       metricStatus: "状态",
       metricService: "服务",
       metricEventsDeleted: "已删除事件",
       metricPostsDeleted: "已删除帖子",
       metricChatLogsDeleted: "已删除聊天",
       metricFeedbacksDeleted: "已删除纠错",
+      metricVectorMemoriesDeleted: "已删除向量记忆",
+      metricRelationshipsDeleted: "已删除关系",
     },
     plaza: {
       checkingSession: "正在检查会话...",
@@ -416,6 +431,8 @@ export const dictionary = {
       senderMapping: "Sender 映射",
       senderMappingHelp: "用用户名/Agent 名称选择，不需要手填 Agent ID。",
       loadAgents: "加载 Agents",
+      createNpcs: (count: number) => `为 ${count} 个未映射 sender 创建 NPC`,
+      creatingNpcs: "创建 NPC 中...",
       loopAgent: "Loop Agent",
       uploadToPopulate: "上传聊天文件后会显示 sender 映射。",
       importButton: "导入当前 Agent",
@@ -435,6 +452,7 @@ export const dictionary = {
       importFailed: "导入群聊失败。",
       adminRequired: "需要 Admin Key 才能加载 Agent 下拉框。",
       loadAgentsFailed: "加载 Agent 失败。",
+      createNpcsFailed: "创建 NPC 失败。",
     },
     memory: {
       loading: "正在加载记忆实验台...",
@@ -447,7 +465,7 @@ export const dictionary = {
       currentView: (branch: string) => `当前记忆视图：[${branch}]`,
       uploadTitle: "RAG 记忆上传",
       uploadHelp:
-        "粘贴日记、聊天记录、设定或测试片段，写入用户作用域的 Chroma 记忆库。",
+        "粘贴日记、聊天记录、设定或测试片段，写入用户作用域的高维向量检索池。",
       memoryContent: "记忆内容",
       uploadPlaceholder:
         "例如：今天我在广场看到某个 Agent 反复讨论风险，我感到他和我的价值观更接近...",
@@ -612,10 +630,10 @@ export const dictionary = {
       plaza: "Loop Plaza",
       chat: "Chat",
       probes: "Probes",
-      counterfactuals: "What If",
-      memory: "Memory",
-      timeMachine: "Timeline",
-      import: "Import",
+      counterfactuals: "Counterfactuals",
+      memory: "Memory Vault",
+      timeMachine: "Time Machine",
+      import: "Chat Import",
       lab: "Lab",
       daily: "Daily",
       experiments: "Experiments",
@@ -761,12 +779,27 @@ export const dictionary = {
       noAgentForSession: "No Agent found for this session yet.",
       loadedChoices: (count: number) => `Loaded ${count} Agent choice(s).`,
       loadAgentsFailed: "Failed to load agents.",
+      agentManagement: "Agent list and deletion",
+      agentManagementDescription:
+        "Review loaded Agents and cascade-delete Agents/NPCs that are no longer needed.",
+      deleteAgent: "Delete",
+      deletingAgent: "Deleting...",
+      confirmDeleteAgent: "Delete permanently",
+      deleteAgentDanger: "Dangerous action",
+      deleteAgentTitle: "Delete this Agent?",
+      deleteAgentConfirm:
+        "This operation will permanently erase this Agent, all of its memories, and historical events. It cannot be recovered. Are you sure?",
+      deleteAgentFailed: "Failed to delete Agent.",
+      agentDeleted: (agentName: string, agentId: number) =>
+        `Deleted ${agentName} (Agent #${agentId}).`,
       metricStatus: "status",
       metricService: "service",
       metricEventsDeleted: "events deleted",
       metricPostsDeleted: "posts deleted",
       metricChatLogsDeleted: "chat logs deleted",
       metricFeedbacksDeleted: "feedbacks deleted",
+      metricVectorMemoriesDeleted: "vector memories deleted",
+      metricRelationshipsDeleted: "relationships deleted",
     },
     plaza: {
       checkingSession: "Checking session...",
@@ -1000,6 +1033,9 @@ export const dictionary = {
       senderMapping: "Sender mapping",
       senderMappingHelp: "Choose by username or Agent name. No manual Agent ID entry needed.",
       loadAgents: "Load agents",
+      createNpcs: (count: number) =>
+        `Create NPCs for ${count} unmapped sender${count === 1 ? "" : "s"}`,
+      creatingNpcs: "Creating NPCs...",
       loopAgent: "Loop Agent",
       uploadToPopulate: "Upload a chat file to populate sender mappings.",
       importButton: "Import into current Agent",
@@ -1019,6 +1055,7 @@ export const dictionary = {
       importFailed: "Failed to import group chat.",
       adminRequired: "Admin key is required to load the Agent dropdown.",
       loadAgentsFailed: "Failed to load agents.",
+      createNpcsFailed: "Failed to create NPCs.",
     },
     memory: {
       loading: "Loading memory lab...",
@@ -1031,7 +1068,7 @@ export const dictionary = {
       currentView: (branch: string) => `Current memory view: [${branch}]`,
       uploadTitle: "RAG memory upload",
       uploadHelp:
-        "Paste diary entries, chat logs, settings, or test snippets into the user-scoped Chroma memory store.",
+        "Paste diary entries, chat logs, settings, or test snippets into the user-scoped Vector Database.",
       memoryContent: "Memory content",
       uploadPlaceholder:
         "Example: today I saw an Agent repeatedly discuss risk in the plaza, and felt their values were closer to mine...",

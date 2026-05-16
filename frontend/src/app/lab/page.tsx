@@ -7,10 +7,12 @@ import { useLanguage } from "@/components/LanguageContext";
 import {
   API_BASE_URL,
   Agent,
+  AgentDeletionResponse,
   AgentSessionChoice,
   HealthResponse,
   PostOut,
   apiRequest,
+  formatAgentChoiceLabel,
 } from "@/lib/api";
 import { LoopSession, getAccessToken, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
@@ -60,6 +62,10 @@ export default function LabPage() {
   const [exportPreview, setExportPreview] = useState("");
   const [exportMeta, setExportMeta] = useState("");
   const [purgeResult, setPurgeResult] = useState<BranchPurgeResult | null>(null);
+  const [agentDeleteResult, setAgentDeleteResult] =
+    useState<AgentDeletionResponse | null>(null);
+  const [agentPendingDelete, setAgentPendingDelete] =
+    useState<AgentSessionChoice | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
@@ -69,6 +75,7 @@ export default function LabPage() {
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [isPurgingBranch, setIsPurgingBranch] = useState(false);
+  const [isDeletingAgent, setIsDeletingAgent] = useState(false);
 
   const hasAdminKey = useMemo(() => adminKey.trim().length > 0, [adminKey]);
 
@@ -94,6 +101,7 @@ export default function LabPage() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
@@ -154,6 +162,7 @@ export default function LabPage() {
         },
       );
       setAgentChoices(choices);
+      setAgentDeleteResult(null);
       setMessage(copy.loadedChoices(choices.length));
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.loadAgentsFailed);
@@ -325,6 +334,57 @@ export default function LabPage() {
     }
   }
 
+  function requestDeleteAgent(choice: AgentSessionChoice) {
+    setAgentPendingDelete(choice);
+    setAgentDeleteResult(null);
+    setError("");
+    setMessage("");
+  }
+
+  async function confirmDeleteAgent() {
+    if (!agentPendingDelete || !hasAdminKey) {
+      return;
+    }
+
+    const deletingAgentId = agentPendingDelete.agent.id;
+    setError("");
+    setMessage("");
+    setIsDeletingAgent(true);
+    try {
+      const result = await apiRequest<AgentDeletionResponse>(
+        `/api/agents/${deletingAgentId}`,
+        {
+          method: "DELETE",
+          headers: adminHeaders(),
+        },
+      );
+      setAgentChoices((choices) =>
+        choices.filter((choice) => choice.agent.id !== deletingAgentId),
+      );
+      if (targetAgentId === String(deletingAgentId)) {
+        setTargetAgentId("");
+        setTargetUsername(session?.username ?? "");
+      }
+      if (session?.agent_id === deletingAgentId) {
+        const updatedSession = {
+          ...session,
+          agent_id: undefined,
+          agent_name: undefined,
+          agent_is_npc: undefined,
+        };
+        saveSession(updatedSession);
+        setSession(updatedSession);
+      }
+      setAgentPendingDelete(null);
+      setAgentDeleteResult(result);
+      setMessage(copy.agentDeleted(result.agent_name, result.agent_id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.deleteAgentFailed);
+    } finally {
+      setIsDeletingAgent(false);
+    }
+  }
+
   if (!session) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-gray-50 px-6">
@@ -404,7 +464,7 @@ export default function LabPage() {
                 <option value="">{t.common.chooseLoadedAgent}</option>
                 {agentChoices.map((choice) => (
                   <option key={choice.agent.id} value={choice.agent.id}>
-                    @{choice.user.username} · {choice.agent.agent_name}
+                    {formatAgentChoiceLabel(choice)}
                   </option>
                 ))}
               </select>
@@ -431,6 +491,85 @@ export default function LabPage() {
             </div>
           </div>
         </section>
+
+        {agentChoices.length > 0 || agentDeleteResult ? (
+          <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-950">
+                  {copy.agentManagement}
+                </h2>
+                <p className="mt-1 text-sm leading-6 text-gray-500">
+                  {copy.agentManagementDescription}
+                </p>
+              </div>
+              <button
+                className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!hasAdminKey || isLoadingAgents}
+                onClick={loadAgentChoices}
+                type="button"
+              >
+                {isLoadingAgents ? t.common.loading : t.common.refreshing}
+              </button>
+            </div>
+            {agentChoices.length > 0 ? (
+              <div className="mt-4 overflow-hidden rounded-lg border border-gray-200">
+                <div className="divide-y divide-gray-100">
+                  {agentChoices.map((choice) => (
+                    <div
+                      className="grid gap-3 bg-white px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                      key={choice.agent.id}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-semibold text-gray-950">
+                            {formatAgentChoiceLabel(choice)}
+                          </p>
+                          {choice.agent.is_npc ? (
+                            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">
+                              NPC
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 text-xs text-gray-500">
+                          Agent #{choice.agent.id} · User #{choice.user.id}
+                        </p>
+                      </div>
+                      <button
+                        className="rounded-full border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        disabled={!hasAdminKey || isDeletingAgent}
+                        onClick={() => requestDeleteAgent(choice)}
+                        type="button"
+                      >
+                        {copy.deleteAgent}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {agentDeleteResult ? (
+              <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <Metric
+                  label={copy.metricEventsDeleted}
+                  value={agentDeleteResult.event_logs_deleted}
+                />
+                <Metric
+                  label={copy.metricChatLogsDeleted}
+                  value={agentDeleteResult.chat_logs_deleted}
+                />
+                <Metric
+                  label={copy.metricVectorMemoriesDeleted}
+                  value={agentDeleteResult.vector_memories_deleted}
+                />
+                <Metric
+                  label={copy.metricRelationshipsDeleted}
+                  value={agentDeleteResult.relationships_deleted}
+                />
+              </dl>
+            ) : null}
+          </section>
+        ) : null}
 
         <div className="grid gap-5 lg:grid-cols-2">
           <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -648,6 +787,46 @@ export default function LabPage() {
           ) : null}
         </section>
       </div>
+      {agentPendingDelete ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/50 px-4 py-6">
+          <div
+            aria-modal="true"
+            className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl"
+            role="dialog"
+          >
+            <p className="text-xs font-semibold uppercase tracking-wide text-rose-600">
+              {copy.deleteAgentDanger}
+            </p>
+            <h2 className="mt-2 text-lg font-semibold text-gray-950">
+              {copy.deleteAgentTitle}
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-gray-600">
+              {copy.deleteAgentConfirm}
+            </p>
+            <p className="mt-4 rounded-lg bg-gray-50 px-4 py-3 text-sm font-medium text-gray-800">
+              {formatAgentChoiceLabel(agentPendingDelete)}
+            </p>
+            <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isDeletingAgent}
+                onClick={() => setAgentPendingDelete(null)}
+                type="button"
+              >
+                {t.common.cancel}
+              </button>
+              <button
+                className="rounded-full bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={!hasAdminKey || isDeletingAgent}
+                onClick={confirmDeleteAgent}
+                type="button"
+              >
+                {isDeletingAgent ? copy.deletingAgent : copy.confirmDeleteAgent}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

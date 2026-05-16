@@ -7,6 +7,7 @@ import { useLanguage } from "@/components/LanguageContext";
 import {
   Agent,
   AgentWorkingMemoryState,
+  MemoryConsolidationAcceptedResponse,
   MemoryConsolidationResponse,
   MemorySearchResponse,
   MemoryUploadResponse,
@@ -77,6 +78,7 @@ export default function MemoryPage() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
@@ -228,12 +230,12 @@ export default function MemoryPage() {
     setToast("");
     setIsSleeping(true);
     try {
-      const result = await apiRequest<MemoryConsolidationResponse>(
+      const result = await apiRequest<MemoryConsolidationAcceptedResponse>(
         "/api/agents/me/sleep",
         { method: "POST" },
       );
-      setSleepResult(result);
-      setToast(result.graph_memory_cleared ? copy.sleepDone : result.message);
+      setSleepResult(null);
+      setToast(result.message);
       await refreshDiagnostics(session, currentBranch);
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.sleepFailed);

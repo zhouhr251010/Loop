@@ -23,16 +23,24 @@ _current_tool_user_id: ContextVar[int | None] = ContextVar(
     "current_tool_user_id",
     default=None,
 )
+_current_tool_agent_id: ContextVar[int | None] = ContextVar(
+    "current_tool_agent_id",
+    default=None,
+)
 
 
-def set_tool_user_context(user_id: int | None):
+def set_tool_user_context(user_id: int | None, agent_id: int | None = None):
     """Set the user context used by user-scoped tools during one graph run."""
-    return _current_tool_user_id.set(user_id)
+    user_token = _current_tool_user_id.set(user_id)
+    agent_token = _current_tool_agent_id.set(agent_id)
+    return user_token, agent_token
 
 
 def reset_tool_user_context(token) -> None:
     """Reset the user context after a graph run finishes."""
-    _current_tool_user_id.reset(token)
+    user_token, agent_token = token
+    _current_tool_user_id.reset(user_token)
+    _current_tool_agent_id.reset(agent_token)
 
 
 def _get_config_user_id(config: RunnableConfig | None) -> int | None:
@@ -42,6 +50,15 @@ def _get_config_user_id(config: RunnableConfig | None) -> int | None:
     configurable = config.get("configurable") or {}
     user_id = configurable.get("user_id")
     return user_id if isinstance(user_id, int) else None
+
+
+def _get_config_agent_id(config: RunnableConfig | None) -> int | None:
+    if not config:
+        return None
+
+    configurable = config.get("configurable") or {}
+    agent_id = configurable.get("agent_id")
+    return agent_id if isinstance(agent_id, int) else None
 
 
 @tool
@@ -80,13 +97,22 @@ def read_plaza_feed() -> str:
 
 
 @tool
-def search_personal_memory(query: str, config: RunnableConfig | None = None) -> str:
+async def search_personal_memory(
+    query: str,
+    config: RunnableConfig | None = None,
+) -> str:
     """Search this agent's user-scoped personal memory for relevant fragments."""
     user_id = _get_config_user_id(config) or _current_tool_user_id.get()
+    agent_id = _get_config_agent_id(config) or _current_tool_agent_id.get()
     if user_id is None:
         return "当前没有可用的用户记忆上下文。"
 
-    memories = retrieve_hybrid_memory(user_id=user_id, query=query, top_k=3)
+    memories = await retrieve_hybrid_memory(
+        user_id=user_id,
+        query=query,
+        top_k=3,
+        agent_id=agent_id,
+    )
     if not memories:
         return "没有检索到相关的个人记忆。"
 
@@ -108,15 +134,10 @@ def edit_core_memory(
     new_value: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
 ) -> Command:
-    """MUST BE CALLED whenever the user reveals critical personal information.
+    """Persist durable identity facts into Core Memory.
 
-    This includes long-term facts, health conditions such as allergies or
-    medical constraints, career changes, relationship changes, identity shifts,
-    life-altering events, stable preferences, or core values. Do not just reply
-    in text, do not say you will remember it, and do not rely on chat history.
-    You MUST use this tool to persist the data into long-term Core Memory.
-    Use key to name the affected core-memory field and new_value to store the
-    updated durable fact.
+    Kept for internal compatibility. It is intentionally not exposed through
+    AGENT_TOOLS; chat-time memory writes are owned by the background watcher.
     """
     user_id = _current_tool_user_id.get()
     if user_id is None:
@@ -216,7 +237,6 @@ AGENT_TOOLS = [
     read_plaza_feed,
     search_personal_memory,
     get_current_time,
-    edit_core_memory,
     check_energy_budget,
     update_internal_state,
 ]

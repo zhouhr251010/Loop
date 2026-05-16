@@ -3,7 +3,7 @@
 import logging
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,7 @@ from app.services.llm_service import (
     chat_with_agent_static_prompt,
     fallback_chat_reply,
 )
+from app.services.memory_watcher import extract_and_update_memory_background
 from app.services.rag_service import retrieve_hybrid_memory
 from app.services.time_machine import TimeMachine
 
@@ -65,7 +66,7 @@ def _summarize_diagnostic_text(value: object, limit: int = 180) -> str:
     return f"{text[: limit - 3]}..."
 
 
-def _build_memory_diagnostics(
+async def _build_memory_diagnostics(
     db: Session,
     db_agent: models.Agent,
     current_user: models.User,
@@ -73,6 +74,7 @@ def _build_memory_diagnostics(
     branch_id: str,
     experiment_mode: str,
     reconstructed_core_memory: str | None = None,
+    retrieved_memories: list[str] | None = None,
 ) -> list[ChatMemoryDiagnostic]:
     """Collect a small debug-only snapshot of identity/RAG context."""
     if experiment_mode == "mode_beta":
@@ -90,20 +92,23 @@ def _build_memory_diagnostics(
             ChatMemoryDiagnostic(kind="identity", summary=identity_summary),
         )
 
-    try:
-        retrieved_memories = retrieve_hybrid_memory(
-            user_id=current_user.id,
-            query=message,
-            top_k=3,
-            branch_id=branch_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[Chat Diagnostics] RAG diagnostic retrieval failed for agent_id=%s: %s",
-            db_agent.id,
-            exc,
-        )
-        retrieved_memories = []
+    if retrieved_memories is None:
+        try:
+            retrieved_memories = await retrieve_hybrid_memory(
+                user_id=current_user.id,
+                query=message,
+                top_k=3,
+                branch_id=branch_id,
+                source="chat_diagnostics",
+                agent_id=db_agent.id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Chat Diagnostics] RAG diagnostic retrieval failed for agent_id=%s: %s",
+                db_agent.id,
+                exc,
+            )
+            retrieved_memories = []
 
     for memory in retrieved_memories[:5]:
         summary = _summarize_diagnostic_text(memory)
@@ -126,11 +131,12 @@ def _log_chat_warning(context: str, exc: Exception) -> None:
     )
 
 
-def _create_chat_reply(
+async def _create_chat_reply(
     db: Session,
     db_agent: models.Agent,
     chat_in: ChatMessageCreate,
     current_user: models.User,
+    background_tasks: BackgroundTasks | None = None,
 ) -> ChatReplyOut:
     chat_turn_id = uuid4().hex[:8]
     branch_id = normalize_branch_id(chat_in.branch_id)
@@ -177,8 +183,9 @@ def _create_chat_reply(
             ).strip()
 
         warning = None
+        retrieved_memories: list[str] = []
         if experiment_mode == "mode_beta":
-            agent_reply, memory_chunks_used = chat_with_agent_static_prompt(
+            agent_reply, retrieved_memories = await chat_with_agent_static_prompt(
                 db_agent,
                 chat_in.message,
                 chat_model=chat_in.model,
@@ -205,7 +212,7 @@ def _create_chat_reply(
                 )
 
             try:
-                agent_reply, memory_chunks_used = chat_with_agent(
+                agent_reply, retrieved_memories = await chat_with_agent(
                     db_agent,
                     chat_in.message,
                     chat_model=chat_in.model,
@@ -218,7 +225,7 @@ def _create_chat_reply(
                 )
             except Exception as exc:
                 _log_chat_warning("chat generation failed after service fallback", exc)
-                agent_reply, memory_chunks_used = fallback_chat_reply(
+                agent_reply, retrieved_memories = await fallback_chat_reply(
                     db_agent,
                     chat_in.message,
                     branch_id=branch_id,
@@ -228,6 +235,7 @@ def _create_chat_reply(
                 )
 
         try:
+            memory_chunks_used = len(retrieved_memories)
             chat_log = chat_crud.create_chat_log(
                 db=db,
                 agent_id=db_agent.id,
@@ -256,7 +264,7 @@ def _create_chat_reply(
                 stored=False,
                 warning=warning or "Reply was generated but could not be stored.",
                 query_route=query_route,
-                memory_diagnostics=_build_memory_diagnostics(
+                memory_diagnostics=await _build_memory_diagnostics(
                     db=db,
                     db_agent=db_agent,
                     current_user=current_user,
@@ -264,7 +272,19 @@ def _create_chat_reply(
                     branch_id=branch_id,
                     experiment_mode=experiment_mode,
                     reconstructed_core_memory=reconstructed_core_memory,
+                    retrieved_memories=retrieved_memories,
                 ),
+            )
+
+        if background_tasks is not None:
+            background_tasks.add_task(
+                extract_and_update_memory_background,
+                current_user.id,
+                db_agent.id,
+                branch_id,
+                session_id,
+                chat_in.message,
+                agent_reply,
             )
 
         return ChatReplyOut(
@@ -275,7 +295,7 @@ def _create_chat_reply(
             stored=True,
             warning=warning,
             query_route=query_route,
-            memory_diagnostics=_build_memory_diagnostics(
+            memory_diagnostics=await _build_memory_diagnostics(
                 db=db,
                 db_agent=db_agent,
                 current_user=current_user,
@@ -283,6 +303,7 @@ def _create_chat_reply(
                 branch_id=branch_id,
                 experiment_mode=experiment_mode,
                 reconstructed_core_memory=reconstructed_core_memory,
+                retrieved_memories=retrieved_memories,
             ),
         )
     except Exception:
@@ -304,8 +325,9 @@ def _create_chat_reply(
     response_model=ChatReplyOut,
     status_code=status.HTTP_201_CREATED,
 )
-def chat_with_my_agent_endpoint(
+async def chat_with_my_agent_endpoint(
     chat_in: ChatMessageCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> ChatReplyOut:
@@ -317,7 +339,13 @@ def chat_with_my_agent_endpoint(
             detail="Agent not found for this user.",
         )
 
-    return _create_chat_reply(db, db_agent, chat_in, current_user)
+    return await _create_chat_reply(
+        db,
+        db_agent,
+        chat_in,
+        current_user,
+        background_tasks,
+    )
 
 
 @router.get(
@@ -575,9 +603,10 @@ async def check_agent_identity_drift(
     response_model=ChatReplyOut,
     status_code=status.HTTP_201_CREATED,
 )
-def chat_with_agent_endpoint(
+async def chat_with_agent_endpoint(
     agent_id: int,
     chat_in: ChatMessageCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> ChatReplyOut:
@@ -594,4 +623,10 @@ def chat_with_agent_endpoint(
             detail="You can only chat with your own agent.",
         )
 
-    return _create_chat_reply(db, db_agent, chat_in, current_user)
+    return await _create_chat_reply(
+        db,
+        db_agent,
+        chat_in,
+        current_user,
+        background_tasks,
+    )

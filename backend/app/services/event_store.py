@@ -15,6 +15,7 @@ from app.models import utc_now_seconds
 DEFAULT_BRANCH_ID = "main"
 logger = logging.getLogger(__name__)
 MAX_EVENT_LOG_PAYLOAD_PREVIEW = 1200
+MAX_EVENT_LOG_STRING_CHARS = 500
 
 
 def _json_safe(value: Any) -> Any:
@@ -38,11 +39,24 @@ def _coerce_timestamp(value: datetime | None) -> datetime:
     return value.replace(microsecond=0)
 
 
+def _payload_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) > MAX_EVENT_LOG_STRING_CHARS:
+            return "<truncated>"
+        return value
+    if isinstance(value, dict):
+        return {str(key): _payload_log_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_payload_log_value(item) for item in value]
+    return value
+
+
 def _payload_preview(payload: dict[str, Any]) -> str:
+    log_payload = _payload_log_value(payload)
     try:
-        raw_preview = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        raw_preview = json.dumps(log_payload, ensure_ascii=False, sort_keys=True)
     except TypeError:
-        raw_preview = repr(payload)
+        raw_preview = repr(log_payload)
 
     if len(raw_preview) <= MAX_EVENT_LOG_PAYLOAD_PREVIEW:
         return raw_preview

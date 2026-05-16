@@ -25,6 +25,7 @@ If you only remember the highest-signal things before touching this codebase, re
 - Each `User` owns exactly one `Agent`; questionnaire submission creates or refreshes that one-to-one mapping.
 - Durable identity currently lives in two places: free-form `autobiography` and structured `core_memory`.
 - `core_memory` is not just three loose fields anymore. The normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`.
+- The app now also maintains system-owned NPC agents. Startup seeds one default NPC, and the import flow can create stable NPC agents for external group-chat senders; do not confuse them with participant-owned Agents.
 - Chat is no longer "prompt + RAG only". `mode_alpha` uses the full IACL path with active memory/tools, while `mode_beta` is a static-prompt baseline for blind comparison.
 - M1-M6 validation data now also includes weekly probe responses and life-decision counterfactual anchors. Keep `/api/probes/*`, `/api/counterfactuals/*`, and `ProbeResponse` aligned with the research flow.
 - Chat turns are isolated by `branch_id`, `session_id`, and `topic`; do not accidentally merge independent conversations when loading history, routing context, or drift checks.
@@ -32,7 +33,8 @@ If you only remember the highest-signal things before touching this codebase, re
 - User corrections do not rewrite `posts.content` in place. Branch feed projection overlays the newest `FEEDBACK_CREATED` correction when rendering.
 - Long lists are intentionally bounded on both sides. Plaza, chat history, and event history must stay paginated.
 - The frontend normally talks to Next.js on `localhost:3000`, and Next.js rewrites `/api/*` to FastAPI on `127.0.0.1:8001`. `/health` is the current exception.
-- Local runtime state matters: `backend/loop_research.db` and `chroma_db/` are part of the experiment environment and must not be committed or casually deleted.
+- RAG infrastructure is no longer a local vector-store directory. The current path is Postgres + pgvector for `rag_documents`, Infinity embedding/reranker services on `127.0.0.1:7997/7998`, and optional Redis-backed rate limiting.
+- Local runtime state matters: `.env`, `model_cache/`, and Docker volumes backing Postgres/Redis are part of the experiment environment and must not be committed or casually deleted.
 
 ## Repository Layout
 
@@ -57,9 +59,11 @@ If you only remember the highest-signal things before touching this codebase, re
         simulate.py
         simulation.py
         export.py
+        agents.py
       services/
         llm_service.py
         rag_service.py
+        infinity_client.py
         agent_graph.py
         consolidation_service.py
         core_memory_service.py
@@ -69,6 +73,10 @@ If you only remember the highest-signal things before touching this codebase, re
         feedback_service.py
         drift_detector.py
         scoring_service.py
+        tools.py
+        npc_seed.py
+        memory_watcher.py
+        agent_cleanup_service.py
     requirements.txt
   frontend/
     next.config.mjs
@@ -93,6 +101,7 @@ If you only remember the highest-signal things before touching this codebase, re
     src/app/site-login/page.tsx
     src/app/site-login/SiteLoginForm.tsx
     src/app/site-auth/login/route.ts
+    src/app/layout.tsx
     src/lib/api.ts
     src/lib/i18n.ts
     src/lib/session.ts
@@ -103,8 +112,11 @@ If you only remember the highest-signal things before touching this codebase, re
     package.json
     .env.local.example
   .env
+  .env.example
   .gitignore
   Makefile
+  docker-compose.infra.yml
+  model_cache/
   AGENTS.md
   AGENTS.zh-CN.md
 ```
@@ -112,11 +124,12 @@ If you only remember the highest-signal things before touching this codebase, re
 ## Hard Safety Rules
 
 - Never commit or print secrets from `.env`.
-- Never commit `loop_research.db`; it contains changing research/runtime data.
+- Never commit database dumps or runtime exports; they can contain changing research data.
 - Never commit dependency/cache/build folders such as `frontend/node_modules/`, `frontend/.next/`, `frontend/npm-cache/`, or Python `__pycache__/`.
-- Never commit `chroma_db/`; it is generated local vector-store state.
+- Never commit `model_cache/`; it is generated Hugging Face/Infinity runtime cache.
 - Never batch-delete files or folders. If deletion is needed, delete at most one explicitly named file at a time, and avoid deleting generated data unless the user explicitly asks.
 - Do not invoke destructive cleanup flows such as `/api/admin/purge-branch` unless the user explicitly asks for that specific data removal.
+- Do not call `DELETE /api/agents/{agent_id}` unless the user explicitly asks to remove that Agent and its associated traces.
 - Do not run dependency installs in a global Python environment. Use the existing conda environment named `Loop`.
 - Do not bind development servers to `0.0.0.0`; use loopback plus SSH port forwarding.
 
@@ -127,17 +140,35 @@ Tech stack:
 - Python 3.10+
 - FastAPI
 - SQLAlchemy ORM
-- SQLite
+- PostgreSQL + pgvector is required; startup fails fast when Postgres is not configured
 - bcrypt password hashing
 - compact signed bearer tokens implemented in `backend/app/security.py`
-- in-memory rate limiting, request-size limits, security headers, and trusted-host checks
+- Redis-backed async fixed-window rate limiting when `LOOP_REDIS_URL` is configured, with fail-open behavior plus request-size limits, security headers, and trusted-host checks
 - OpenAI Python SDK pointed at DeepSeek-compatible API
 - python-dotenv
-- ChromaDB persistent local vector store
-- sentence-transformers BGE embedding/reranker models
+- Infinity embedding/reranker services over HTTP for BGE models
 - LangGraph/LangChain-inspired Agent memory graph helpers
 
-Run backend:
+Recommended local stack:
+
+```bash
+make infra
+make backend
+make frontend
+```
+
+`make infra` starts Postgres, Redis, and the Infinity embedding/reranker services from `docker-compose.infra.yml`.
+
+Model cache deployment note:
+
+- `model_cache/` is intentionally git-ignored, but it is part of the runtime environment because Infinity mounts it as `/app/.cache`.
+- On a new server, pre-download models before first experiment run so startup is faster and more stable:
+  1. `make infra`
+  2. `docker compose -f docker-compose.infra.yml up -d embedding reranker`
+  3. Start backend once with `make backend` to trigger `warm_up_rag_models()` and populate `model_cache/`.
+- For faster multi-server rollout, copy `model_cache/` from a warmed server (for example with `rsync`) and keep it outside git.
+
+Run backend only:
 
 ```bash
 make backend
@@ -149,20 +180,20 @@ Backend docs:
 http://localhost:8001/docs
 ```
 
-Database file:
+Database:
 
 ```text
-/mnt/nvme1n1/zhouhr/code_program_after_417/codex_code/Loop/backend/loop_research.db
+PostgreSQL configured through POSTGRES_URL or POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB
 ```
 
-This file is intentionally ignored by Git.
+There is no local database-file fallback.
 
 Core SQLAlchemy tables:
 
 - `User`: username, password hash, MBTI, Big Five, Schwartz values
 - `User.autobiography`: optional digital autobiography / core life memory used as Agent identity memory
 - `User.core_memory`: structured core memory used during chat/post generation; normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`
-- `Agent`: one virtual agent per user
+- `Agent`: one virtual agent per user, plus system-owned NPC agents flagged with `is_npc`
 - `Post`: agent-generated plaza posts
 - `FeedbackLog`: user corrections, including original text, corrected text, timestamp, and future vector-store linkage
 - `ChatLog`: private sync turns with user message, Agent reply, branch id, session id, topic, experiment mode, and second-precision timestamp
@@ -210,7 +241,7 @@ Memory and learning chain:
 
 ```text
 Autobiography / uploads / imported chat / private chat / feedback
-  -> ChromaDB episodic chunks + User.core_memory + ChatLog/FeedbackLog
+  -> Postgres `rag_documents` + User.core_memory + ChatLog/FeedbackLog
   -> Agentic Memory tools actively retrieve or update the right memory
   -> DeepSeek/tool-calling chat or post generation uses branch state + retrieved memory
   -> sleep consolidation and feedback reflection update higher-level memory/relationships
@@ -244,11 +275,13 @@ POST /api/users/login
 GET  /api/users/me
 GET  /api/users/agent-choices                       [admin key]
 POST /api/users/agent-choices/{agent_id}/session    [admin key]
+POST /api/users/npc-agents/from-senders             [admin key]
 POST /api/users/me/questionnaire
 POST /api/users/{user_id}/questionnaire
 GET  /api/users/me/agent
 GET  /api/users/{user_id}/agent
 
+DELETE /api/agents/{agent_id}                       [owner bearer or admin key, destructive]
 POST /api/agents/me/posts
 POST /api/agents/{agent_id}/posts
 GET  /api/posts
@@ -310,14 +343,18 @@ Important backend conventions:
 - Password hashes are never returned by response schemas.
 - Most user/Agent data endpoints require a bearer token from register/login.
 - Research-control endpoints use `X-Loop-Admin-Key`, checked against `LOOP_ADMIN_API_KEY`.
+- If `LOOP_AUTH_SECRET` is unset, bearer tokens fall back to a per-process secret and all sessions become invalid after backend restart.
 - Feedback creation validates that users can only correct posts generated by their own Agent.
 - CORS defaults to `http://localhost:3000` and `http://127.0.0.1:3000`, and can be configured with comma-separated `BACKEND_CORS_ORIGINS` in the root `.env`.
-- `Base.metadata.create_all()` creates new tables; `ensure_sqlite_schema()` performs lightweight SQLite upgrades such as `users.autobiography`, `users.core_memory`, `chat_logs.branch_id`, `chat_logs.session_id`, `chat_logs.experiment_mode`, and append-only `event_logs` triggers, so the existing `.db` does not need to be deleted.
+- `backend/app/database.py` requires Postgres through `POSTGRES_URL` or `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`; missing configuration raises `RuntimeError` during startup.
+- `Base.metadata.create_all()` creates new tables. Startup also ensures the `agents.is_npc` schema, enables the `vector` extension, creates the pgvector-backed `rag_documents` table and indexes, and installs Postgres append-only triggers for `event_logs`.
+- On Postgres, startup also enables the `vector` extension and creates the pgvector-backed `rag_documents` table plus metadata/embedding indexes.
+- FastAPI lifespan initialization runs `initialize_database()`, `ensure_system_npc_agent()`, and then optional RAG warmup in that order.
 - `EventLog` is the timeline source of truth for branch-aware plaza and time-machine reconstruction. Session-level chat history currently reads bounded `ChatLog` pages filtered by `branch_id` and `session_id`.
 - Questionnaire and probe scoring live in `backend/app/services/scoring_service.py`; raw IPIP/PVQ item payloads are converted into scored Big Five/Schwartz summaries before being merged into core memory.
-- `warm_up_rag_models()` runs during FastAPI lifespan unless `LOOP_RAG_PRELOAD=false`; startup can be slow when local BGE models load.
-- `/api/admin/purge-branch` removes runtime records for one non-main branch, temporarily drops and restores the `event_logs_no_delete` SQLite trigger, and should be treated as a destructive research-maintenance operation.
-- `chroma_db/` stores persistent local memory chunks and is ignored by Git.
+- `warm_up_rag_models()` runs during FastAPI lifespan unless `LOOP_RAG_PRELOAD=false`; it warms the external Infinity embedding/reranker endpoints with a lock + TTL guard so multiple workers do not stampede the same model load.
+- `/api/admin/purge-branch` removes runtime records for one non-main branch, temporarily drops and restores the `event_logs_no_delete` Postgres trigger, and should be treated as a destructive research-maintenance operation.
+- Memory upload/search and sleep consolidation RAG writes are stored in Postgres `rag_documents`, not under a local vector-store directory.
 
 ## Backend Reality Checks
 
@@ -325,9 +362,11 @@ These are current implementation facts that are easy to miss when skimming the r
 
 - `core_memory_service.py` normalizes `User.core_memory` to four fields, not three. Older data may be missing `communication_style`, so always normalize before use.
 - `create_or_update_agent_for_user()` updates `Agent.system_prompt_base` in place and emits `AGENT_PROFILE_UPDATED`; agent creation is not a one-time bootstrap only.
+- `ensure_system_npc_agent()` runs at startup, and `/api/users/npc-agents/from-senders` creates or reuses stable NPC Agents keyed by external sender ids for group-chat import.
 - `post_crud.create_post()` and `feedback_crud.create_feedback_log()` always append matching immutable `EventLog` records. Branch feeds are reconstructed from those events.
 - Plaza correction behavior is projection-based: the latest `FEEDBACK_CREATED` event for a post wins for display in a given branch, while the original `Post` row remains unchanged.
 - `chat_crud.create_chat_log()` also appends a `MESSAGE_RECEIVED` event containing `session_id`, `topic`, and `experiment_mode`. Chat history pages read bounded `ChatLog` slices filtered by branch, session, and topic.
+- After chat storage succeeds, `extract_and_update_memory_background()` can asynchronously extract durable identity facts from the latest turn and merge them back through `merge_core_memory_insight()`.
 - `/api/chat/{agent_id}/sessions` groups `ChatLog` rows by `session_id` within a branch and returns latest-session summaries for the chat sidebar.
 - `DRIFT_DETECTED` events are appended by the drift-check endpoint only after `evaluate_drift_zero_shot()` returns `is_drifting=true`; skipped or unavailable judges do not block chat storage.
 - `/api/evaluations/blind-test/{agent_id}` is public by design for external raters and returns up to 5 random chat samples; the submit endpoint writes `Evaluation` rows without requiring participant auth.
@@ -337,7 +376,8 @@ These are current implementation facts that are easy to miss when skimming the r
 - `TimeMachine` intentionally does not replay raw chat transcripts into the prompt state. It rebuilds compact state such as normalized core memory, counterfactual overrides, intimacy, and a short `current_core_memory` string.
 - `GET /api/agents/{agent_id}/events` is currently only existence-checked and paginated; the router does not enforce bearer ownership or admin auth. Treat it as an internal research endpoint until hardened.
 - `POST /api/simulation/fork` now accepts `source_branch_id` plus optional `source_event_id`, validates that the chosen event belongs to the selected branch lineage, reconstructs from that source branch, and stores `from_branch_id` / `parent_event_id` in the fork payload for ancestry tracing.
-- `POST /api/agents/{agent_id}/import_chat` still stores target-agent-perspective memory in Chroma with `branch_id="main"` today, but it now also accepts an optional batch-level `topic` tag for retrieval metadata.
+- `POST /api/agents/{agent_id}/import_chat` still stores target-agent-perspective memory with `branch_id="main"` today, but it now writes those chunks into pgvector-backed `rag_documents` and also accepts an optional batch-level `topic` tag for retrieval metadata.
+- `DELETE /api/agents/{agent_id}` hard-deletes one Agent's event logs, chat logs, posts, feedbacks, relationships, reflection events, evaluations, and pgvector memories; deleting an NPC Agent also removes its backing system user.
 - User-facing memory upload/search endpoints also do not expose branch parameters today; most vector-memory tooling is effectively main-world-line scoped, while branch divergence mainly comes from `EventLog` + `TimeMachine`.
 - Relationship-aware feed logic already exists in two places: `post_crud.get_posts_for_viewer()` and `/api/agents/*/feed-preview`. Be careful not to regress these to pure reverse-chronological order everywhere.
 
@@ -346,8 +386,8 @@ These are current implementation facts that are easy to miss when skimming the r
 Use this section when you need to locate the "real" owner of a behavior quickly:
 
 - `backend/app/main.py`: FastAPI app creation, middleware stack, router mounting, `.env` load, table creation, and optional RAG warmup during lifespan.
-- `backend/app/security.py`: compact signed bearer tokens, admin-key dependency, request-size limit, in-memory rate limit, security headers, and trusted-host enforcement.
-- `backend/app/database.py`: SQLAlchemy engine/session plus lightweight SQLite upgrade logic and append-only triggers for `event_logs`.
+- `backend/app/security.py`: compact signed bearer tokens, admin-key dependency, request-size limit, Redis-backed or fallback rate limit, security headers, and trusted-host enforcement.
+- `backend/app/database.py`: SQLAlchemy engine/session, Postgres/pgvector bootstrap, pgvector RAG table/index creation, and append-only triggers for `event_logs`.
 - `backend/app/models.py`: the research data model, all second-precision timestamps, and the append-only event entity.
 - `backend/app/services/event_store.py`: one sanctioned way to append immutable timeline events with JSON-safe payloads and logging.
 - `backend/app/services/branching.py`: branch id normalization, branch existence, global branch listing, parent-lineage lookup, and fork anchor reconstruction.
@@ -356,8 +396,12 @@ Use this section when you need to locate the "real" owner of a behavior quickly:
 - `backend/app/services/tools.py`: the tool layer exposed to chat agents. If the Agent should "sense" or "act", it likely belongs here.
 - `backend/app/services/agent_graph.py`: LangGraph runtime loop, working-memory topics, summaries, emotion/energy state, and tool binding.
 - `backend/app/services/llm_service.py`: DeepSeek request settings, post generation, chat generation, tool-calling orchestration, fallback reply path, and historical chat loader contract.
+- `backend/app/services/npc_seed.py`: startup seeding for the default system NPC plus stable per-sender NPC Agent creation for imported group chats.
+- `backend/app/services/memory_watcher.py`: post-chat background extraction of durable identity facts that should be merged into core memory.
+- `backend/app/services/agent_cleanup_service.py`: destructive Agent teardown, including dependent SQL rows and pgvector memory cleanup.
 - `backend/app/services/drift_detector.py`: zero-shot identity-consistency judge for recent Agent replies, with bounded prompt context and safe skip behavior when DeepSeek is unavailable.
-- `backend/app/services/rag_service.py`: Chroma persistence, BGE embedding/reranking, memory chunking, hybrid retrieval, preload, and strict/fallback behavior.
+- `backend/app/services/infinity_client.py`: shared async HTTP client with bounded retry/backoff for the external Infinity embedding/reranker services.
+- `backend/app/services/rag_service.py`: Postgres/pgvector-backed memory storage, Infinity embedding/reranking, memory chunking, hybrid retrieval, preload, and strict/fallback behavior.
 - `backend/app/services/scoring_service.py`: IPIP-NEO-120 and PVQ-21 scoring, legacy aggregate preservation, and questionnaire-score mergeback into core memory.
 - `backend/app/services/consolidation_service.py`: 24-hour record collection, offline sleep-style consolidation, relationship updates, scored episodic memory creation, and working-memory clearing logic.
 - `backend/app/services/feedback_service.py`: post-correction reflection merge path after user feedback.
@@ -381,22 +425,26 @@ DEEPSEEK_THINKING=enabled
 DEEPSEEK_CHAT_THINKING=disabled
 DEEPSEEK_POST_THINKING=disabled
 DEEPSEEK_REASONING_EFFORT=high
-DEEPSEEK_CHAT_REASONING_EFFORT=high
-DEEPSEEK_POST_REASONING_EFFORT=high
 LOOP_CHAT_ENGINE=tool_calling
 LOOP_LLM_TIMEOUT_SECONDS=8
 LOOP_POST_LLM_TIMEOUT_SECONDS=20
 LOOP_CHAT_LLM_TIMEOUT_SECONDS=25
 LOOP_DEEP_CHAT_LLM_TIMEOUT_SECONDS=60
-LOOP_CHAT_MAX_TOKENS=900
-LOOP_DEEP_CHAT_MAX_TOKENS=1800
+LOOP_CHAT_MAX_TOKENS=600
+LOOP_DEEP_CHAT_MAX_TOKENS=1200
 LOOP_POST_MAX_TOKENS=360
 LOOP_VECTOR_RAG_ENABLED=true
 LOOP_RERANKER_ENABLED=true
 LOOP_RAG_PRELOAD=true
 LOOP_RAG_STRICT=true
-LOOP_EMBEDDING_DEVICE=cuda:0
-LOOP_RERANKER_DEVICE=cuda:1
+LOOP_EMBEDDING_MODEL=BAAI/bge-large-zh-v1.5
+LOOP_RERANKER_MODEL=BAAI/bge-reranker-large
+LOOP_EMBEDDING_BASE_URL=http://127.0.0.1:7997
+LOOP_RERANKER_BASE_URL=http://127.0.0.1:7998
+LOOP_INFINITY_TIMEOUT_SECONDS=30
+LOOP_INFINITY_RETRIES=3
+LOOP_INFINITY_RETRY_BACKOFF_SECONDS=0.5
+LOOP_EMBEDDING_DIM=1024
 LOOP_CORE_MEMORY_INTENT_LLM_ENABLED=true
 LOOP_TOPIC_ROUTER_LLM_ENABLED=true
 LOOP_DRIFT_JUDGE_MODEL=deepseek-chat
@@ -404,8 +452,15 @@ LOOP_DRIFT_JUDGE_TIMEOUT_SECONDS=12
 LOOP_DRIFT_JUDGE_MAX_TOKENS=360
 LOOP_DRIFT_JUDGE_THINKING=disabled
 LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
+LOOP_CONSOLIDATION_LLM_TIMEOUT_SECONDS=60
+LOOP_CONSOLIDATION_LLM_MAX_RETRIES=0
 LOOP_ADMIN_API_KEY=choose_a_private_admin_key
 LOOP_AUTH_SECRET=choose_a_stable_token_signing_secret
+POSTGRES_USER=loop_admin
+POSTGRES_PASSWORD=choose_a_private_postgres_password
+POSTGRES_DB=loop_research
+LOOP_REDIS_PASSWORD=choose_a_private_redis_password
+LOOP_REDIS_URL=redis://:password@127.0.0.1:6379/0
 LOOP_ACCESS_TOKEN_TTL_SECONDS=86400
 LOOP_MAX_REQUEST_BYTES=524288
 LOOP_RATE_LIMIT_REQUESTS=120
@@ -428,12 +483,14 @@ DeepSeek integration details:
 - Uses standard `client.chat.completions.create(...)`.
 - Extracts generated text from `response.choices[0].message.content`.
 - Defaults to `deepseek-v4-pro` for deep chat / thinking paths, `deepseek-chat` for fast chat, and `DEEPSEEK_POST_MODEL` for simulated posts unless overridden by env vars.
+- The checked-in `.env.example` is a minimal baseline for local setup. It includes the core Postgres/Redis variables used by `make infra`, but it still uses the legacy `INFINITY_EMBEDDING_URL` / `INFINITY_RERANKER_URL` names and omits some optional tuning knobs shown above.
 - Chat UI model choices map to backend modes: `fast` uses `DEEPSEEK_CHAT_MODEL`; `deep` uses `DEEPSEEK_MODEL`.
 - Chat experiment modes map to backend generation paths: `mode_alpha` uses the full active-memory/IACL path; `mode_beta` uses the static prompt baseline. Older aliases `full_iacl` and `static_prompt` normalize to those neutral labels.
 - Simulated post generation treats missing/failing DeepSeek as an error (`LLMPostGenerationError` -> API 500) so failed research runs are visible. Private chat still falls back to a local memory-aware reply when remote generation fails after service fallback.
 - Drift judging uses the DeepSeek-compatible client when `DEEPSEEK_API_KEY` exists. If the judge is unavailable, chat continues and the UI shows a non-blocking skip notice.
 - Agent post generation and private chat replies both inject the user's identity data. If `autobiography` exists, it is treated as core memory / life background.
 - Memory consolidation and feedback reflection also use DeepSeek where configured, with safe fallbacks or errors depending on path.
+- `rag_service.py` still accepts the legacy `INFINITY_EMBEDDING_URL` and `INFINITY_RERANKER_URL` env vars, but the current preferred names are `LOOP_EMBEDDING_BASE_URL` and `LOOP_RERANKER_BASE_URL`.
 
 ## Frontend
 
@@ -506,15 +563,15 @@ Implemented pages:
 - `/probes`: authenticated IPIP-120/PVQ-21 probe form for weekly M1-M6 baseline updates.
 - `/counterfactuals`: authenticated life-decision counterfactual anchor form with AI suggestion cards and actual-choice / actual-result fields that writes durable identity memory.
 - `/evaluations/[agent_id]`: public blind-test page that shows sampled chat snippets and records friend/colleague/family authenticity ratings.
-- `/import`: client-side JSON / TXT / HTML group-chat import parser, sender-to-Agent mapping UI, date filters, topic tagging, and import submission.
+- `/import`: client-side JSON / TXT / HTML group-chat import parser, sender-to-Agent mapping UI, admin-key-assisted NPC sender seeding, date filters, topic tagging, and import submission.
 - `/memory`: memory vault/lab for long-form memory upload, semantic search, sleep consolidation, working-memory diagnostics, relationships, and personalized feed preview.
 - `/time-machine`: event timeline viewer and counterfactual branch/fork console.
-- `/lab`: research/admin console for health checks, simulation posts/ticks, Agent switching, branch selection, JSONL exports, and destructive non-main branch purge.
+- `/lab`: research/admin console for health checks, simulation posts/ticks, Agent switching, destructive Agent deletion, branch selection, JSONL exports, and destructive non-main branch purge.
 - `/site-login`: site-level access gate shown by Next.js middleware before the app is usable.
 
 Frontend MVP behavior:
 
-- Registration/login stores `user_id`, `username`, bearer `access_token`, token expiry, and later `agent_id`/`agent_name` in `localStorage` under `loop_session`.
+- Registration/login stores `user_id`, `username`, bearer `access_token`, token expiry, and later `agent_id`/`agent_name`/`agent_is_npc` in `localStorage` under `loop_session`.
 - If a user refreshes after authentication but before questionnaire submission, `/` restores the saved session and lets the user continue.
 - Questionnaire submission sends MBTI, Big Five, Schwartz values, and `autobiography`, then stores `agent_id` and `agent_name`.
 - `frontend/src/lib/api.ts` attaches `Authorization: Bearer <token>` to API calls.
@@ -527,7 +584,9 @@ Frontend MVP behavior:
 - Chat sends `session_id`, `topic`, and `experiment_mode`; `mode_alpha` replies trigger a drift check and may open a calibration modal when recent replies drift from core identity.
 - Probes load `frontend/src/data/questionnaires.json` and submit authenticated weekly validation answers to `/api/probes/submit`.
 - Counterfactuals page can prefill from `GET /api/counterfactuals/suggestions`, then submits authenticated life-decision alternatives to `/api/counterfactuals/submit`, updating durable identity memory.
+- Import page can create or reuse stable NPC Agents for unmapped external senders through `POST /api/users/npc-agents/from-senders` before submitting `POST /api/agents/{agent_id}/import_chat`.
 - Memory and chat pages use `BranchSelector` so a user can inspect or operate on `main` and forked branches.
+- Lab can delete one Agent at a time through `DELETE /api/agents/{agent_id}`; owners may delete their own Agent, while admins may delete any Agent.
 - `AppProviders` wraps the UI in `LanguageProvider`; page copy is loaded from `frontend/src/locales/dictionary.ts` and persisted as `loop_ui_language`.
 - Site access middleware requires `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`; successful login sets an HTTP-only `loop_site_auth` cookie.
 - Site middleware intentionally leaves `/evaluations/*` and `/api/evaluations/*` public so external blind-test raters can access shared evaluation links.
@@ -613,6 +672,7 @@ Frontend UI notes:
 
 - Parses the file client-side, including delimiter-based plain-text logs and HTML exports.
 - Collects sender ids and lets the researcher map them to known Agent ids.
+- Can call `POST /api/users/npc-agents/from-senders` with an admin key to create or reuse stable NPC Agents for unmapped external senders.
 - Supports optional start/end date filters and one batch-level topic tag before upload.
 - Sends target-agent-perspective import records to `POST /api/agents/me/import_chat`.
 - The backend differentiates "my messages" from "others' messages" in stored memory metadata.
@@ -644,6 +704,7 @@ Frontend UI notes:
 - Checks backend health.
 - Lists agents and branches.
 - Triggers one-off simulated posts or global ticks.
+- Can delete one Agent at a time through `DELETE /api/agents/{agent_id}`.
 - Exports chatlogs or feedbacks as JSONL.
 - Can purge a non-main branch through the destructive admin endpoint.
 
@@ -694,24 +755,25 @@ When modifying core behavior, verify these invariants before you call the work d
 
 ## End-to-End Test Flow
 
-1. Start backend with `make backend`.
-2. Start frontend with `make frontend`.
-3. From your personal computer, open `http://localhost:3000` through the SSH tunnel.
-4. Pass `/site-login` if site-level auth env vars are configured.
-5. Register or log in as a participant.
-6. Submit MBTI, Big Five, Schwartz values, and a digital autobiography / identity-core memory.
-7. Confirm redirect to `/plaza`.
-8. In `/lab` or backend docs, run `POST /api/simulate/tick` with `X-Loop-Admin-Key`.
-9. Refresh `/plaza` and confirm generated posts appear.
-10. Correct a post from the current user's Agent.
-11. Open `/chat`, send a nightly sync message, and confirm the Agent replies.
-12. In `/chat`, create a new conversation, switch between `mode_alpha` and `mode_beta`, and confirm session history stays isolated.
-13. Open `/probes`, submit the current IPIP/PVQ probe set, and confirm the Agent profile still loads.
-14. Open `/counterfactuals`, submit one life-decision anchor, and confirm memory diagnostics show the updated core memory.
-15. Open `/evaluations/{agent_id}` in a fresh browser context and submit a blind-test rating.
-16. Open `/memory`, upload/search memory, trigger sleep consolidation, and refresh diagnostics.
-17. Open `/time-machine`, load events, fork a branch from an event, and verify branch selectors include the new branch.
-18. In `/lab`, export chatlogs or feedbacks as JSONL with the admin key.
+1. Start infrastructure with `make infra`.
+2. Start backend with `make backend`.
+3. Start frontend with `make frontend`.
+4. From your personal computer, open `http://localhost:3000` through the SSH tunnel.
+5. Pass `/site-login` if site-level auth env vars are configured.
+6. Register or log in as a participant.
+7. Submit MBTI, Big Five, Schwartz values, and a digital autobiography / identity-core memory.
+8. Confirm redirect to `/plaza`.
+9. In `/lab` or backend docs, run `POST /api/simulate/tick` with `X-Loop-Admin-Key`.
+10. Refresh `/plaza` and confirm generated posts appear.
+11. Correct a post from the current user's Agent.
+12. Open `/chat`, send a nightly sync message, and confirm the Agent replies.
+13. In `/chat`, create a new conversation, switch between `mode_alpha` and `mode_beta`, and confirm session history stays isolated.
+14. Open `/probes`, submit the current IPIP/PVQ probe set, and confirm the Agent profile still loads.
+15. Open `/counterfactuals`, submit one life-decision anchor, and confirm memory diagnostics show the updated core memory.
+16. Open `/evaluations/{agent_id}` in a fresh browser context and submit a blind-test rating.
+17. Open `/memory`, upload/search memory, trigger sleep consolidation, and refresh diagnostics.
+18. Open `/time-machine`, load events, fork a branch from an event, and verify branch selectors include the new branch.
+19. In `/lab`, export chatlogs or feedbacks as JSONL with the admin key.
 
 If `DEEPSEEK_API_KEY` is missing, `/api/simulate/*` post generation should fail visibly with a server error; chat paths should still return a local fallback reply.
 
@@ -817,8 +879,8 @@ Ensure ignored/sensitive files are not staged.
 - Remote dev servers must bind to `127.0.0.1`, never `0.0.0.0`.
 - Browser `127.0.0.1` means the user's local computer. Use SSH local forwarding from the personal computer, keep `NEXT_PUBLIC_API_BASE_URL` empty for same-origin frontend calls, and let Next.js proxy `/api/*` to `BACKEND_INTERNAL_API_BASE_URL`.
 - `frontend/.env.local` is intentionally ignored by Git; commit only `frontend/.env.local.example`.
-- The root `.env` is intentionally ignored by Git and may contain DeepSeek, admin, token, CORS, host, site-auth, and RAG settings.
-- `backend/loop_research.db` and `chroma_db/` are local research/runtime state and must stay untracked.
+- The root `.env` is intentionally ignored by Git and may contain DeepSeek, admin, token, CORS, host, site-auth, Postgres, Redis, and Infinity settings.
+- Postgres/Redis runtime state usually lives in Docker volumes and Infinity model artifacts live under `model_cache/`; keep all of them untracked.
 - In Codex's sandbox, listening sockets may fail with `PermissionError: [Errno 1] Operation not permitted`; running the same server command normally on the remote shell works.
 - In Codex's sandbox, GitHub network access may fail. The local repo already has `origin` configured; pushing from a normal shell should work.
 

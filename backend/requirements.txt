@@ -1,12 +1,14 @@
 fastapi
 uvicorn[standard]
+gunicorn
 sqlalchemy
+psycopg2-binary
 pydantic
 bcrypt
 python-multipart
 openai
 python-dotenv
-chromadb>=0.4.24
-sentence-transformers
+httpx
+redis
 langgraph
 langchain-openai

@@ -70,6 +70,7 @@ export default function PlazaPage() {
           ...storedSession,
           agent_id: agent.id,
           agent_name: agent.agent_name,
+          agent_is_npc: agent.is_npc,
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
@@ -206,6 +207,7 @@ export default function PlazaPage() {
             ...session,
             agent_id: agent.id,
             agent_name: agent.agent_name,
+            agent_is_npc: agent.is_npc,
           };
           const createdPost = await apiRequest<Omit<Post, "agent_name">>(
             "/api/agents/me/posts",

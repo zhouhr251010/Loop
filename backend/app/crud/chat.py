@@ -1,22 +1,14 @@
 """Database operations for private agent chat logs."""
 
-from time import sleep
-
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import models
 from app.models import utc_now_seconds
 from app.services.event_store import append_event
 
-RECENT_CHAT_HISTORY_TURNS = 3
+RECENT_CHAT_HISTORY_TURNS = 30
 HISTORICAL_CHAT_LOG_MIN_TURNS = 5
 HISTORICAL_CHAT_LOG_MAX_TURNS = 50
-
-
-def _is_sqlite_busy(exc: OperationalError) -> bool:
-    message = str(exc).lower()
-    return "database is locked" in message or "database is busy" in message
 
 
 def create_chat_log(
@@ -38,47 +30,38 @@ def create_chat_log(
         (experiment_mode or "mode_alpha").strip() or "mode_alpha"
     )
     normalized_topic = (topic or "general").strip()[:64] or "general"
-    for attempt in range(3):
-        timestamp = utc_now_seconds()
-        db_chat_log = models.ChatLog(
-            agent_id=agent_id,
-            branch_id=normalized_branch_id,
-            session_id=normalized_session_id,
-            experiment_mode=normalized_experiment_mode,
-            topic=normalized_topic,
-            user_message=user_message,
-            agent_reply=agent_reply,
-            timestamp=timestamp,
-        )
-        db.add(db_chat_log)
-        try:
-            db.flush()
-            append_event(
-                db,
-                agent_id=agent_id,
-                branch_id=normalized_branch_id,
-                event_type="MESSAGE_RECEIVED",
-                payload={
-                    "user_message": user_message,
-                    "agent_reply": agent_reply,
-                    "chat_log_id": db_chat_log.id,
-                    "session_id": normalized_session_id,
-                    "experiment_mode": normalized_experiment_mode,
-                    "topic": normalized_topic,
-                },
-                timestamp=timestamp,
-                commit=False,
-            )
-            db.commit()
-            db.refresh(db_chat_log)
-            return db_chat_log
-        except OperationalError as exc:
-            db.rollback()
-            if attempt == 2 or not _is_sqlite_busy(exc):
-                raise
-            sleep(0.15 * (attempt + 1))
-
-    raise RuntimeError("Failed to persist chat log.")
+    timestamp = utc_now_seconds()
+    db_chat_log = models.ChatLog(
+        agent_id=agent_id,
+        branch_id=normalized_branch_id,
+        session_id=normalized_session_id,
+        experiment_mode=normalized_experiment_mode,
+        topic=normalized_topic,
+        user_message=user_message,
+        agent_reply=agent_reply,
+        timestamp=timestamp,
+    )
+    db.add(db_chat_log)
+    db.flush()
+    append_event(
+        db,
+        agent_id=agent_id,
+        branch_id=normalized_branch_id,
+        event_type="MESSAGE_RECEIVED",
+        payload={
+            "user_message": user_message,
+            "agent_reply": agent_reply,
+            "chat_log_id": db_chat_log.id,
+            "session_id": normalized_session_id,
+            "experiment_mode": normalized_experiment_mode,
+            "topic": normalized_topic,
+        },
+        timestamp=timestamp,
+        commit=False,
+    )
+    db.commit()
+    db.refresh(db_chat_log)
+    return db_chat_log
 
 
 def get_recent_chat_logs(

@@ -105,6 +105,7 @@ export default function OnboardingPage() {
         ? {
             agent_id: agent.id,
             agent_name: agent.agent_name,
+            agent_is_npc: agent.is_npc,
           }
         : {}),
     });
@@ -197,6 +198,7 @@ export default function OnboardingPage() {
         token_expires_at: currentSession?.token_expires_at,
         agent_id: result.agent.id,
         agent_name: result.agent.agent_name,
+        agent_is_npc: result.agent.is_npc,
       });
       router.push("/plaza");
     } catch (err) {
@@ -449,6 +451,11 @@ export default function OnboardingPage() {
                       <div>
                         <p className="font-medium text-gray-950">
                           {choice.agent.agent_name}
+                          {choice.agent.is_npc ? (
+                            <span className="ml-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-500">
+                              NPC
+                            </span>
+                          ) : null}
                         </p>
                         <p className="text-sm text-gray-500">
                           @{choice.user.username} · {copy.userMeta} #{choice.user.id} ·{" "}

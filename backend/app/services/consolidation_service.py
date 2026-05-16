@@ -18,6 +18,7 @@ from app.database import SessionLocal
 from app.models import utc_now_seconds
 from app.services.core_memory_service import merge_core_memory_insight
 from app.services.event_store import append_event
+from app.services.llm_service import build_async_deepseek_client
 from app.services.rag_service import add_scored_memories
 
 
@@ -287,7 +288,7 @@ def _parse_json_array_or_abort(raw_text: str, context: str) -> list[Any]:
     return parsed
 
 
-def _call_deepseek_json(
+async def _call_deepseek_json(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 700,
@@ -296,16 +297,13 @@ def _call_deepseek_json(
     if not api_key:
         raise ConsolidationLLMError("DEEPSEEK_API_KEY is not configured.")
 
+    async_client = build_async_deepseek_client(
+        api_key=api_key,
+        timeout_seconds=CONSOLIDATION_LLM_TIMEOUT_SECONDS,
+        max_retries=CONSOLIDATION_LLM_MAX_RETRIES,
+    )
     try:
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=DEEPSEEK_BASE_URL,
-            timeout=CONSOLIDATION_LLM_TIMEOUT_SECONDS,
-            max_retries=CONSOLIDATION_LLM_MAX_RETRIES,
-        )
-        response = client.chat.completions.create(
+        response = await async_client.chat.completions.create(
             model=DEFAULT_CONSOLIDATION_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -326,9 +324,11 @@ def _call_deepseek_json(
             exc,
         )
         raise ConsolidationLLMError("DeepSeek request failed during sleep.") from exc
+    finally:
+        await async_client.close()
 
 
-def _score_episodic_memories(
+async def _score_episodic_memories(
     source_agent: models.Agent,
     records: list[str],
 ) -> list[dict[str, Any]]:
@@ -348,7 +348,7 @@ def _score_episodic_memories(
         f"Agent: id={source_agent.id}, name={source_agent.agent_name}\n"
         f"Memory Stream:\n{record_text}"
     )
-    raw_text = _call_deepseek_json(
+    raw_text = await _call_deepseek_json(
         "你只输出 JSON 数组。",
         prompt,
         max_tokens=1400,
@@ -383,7 +383,7 @@ def _score_episodic_memories(
     )
 
 
-def _extract_graph_triples(
+async def _extract_graph_triples(
     source_agent: models.Agent,
     candidate_agents: list[models.Agent],
     records: list[str],
@@ -413,7 +413,7 @@ def _extract_graph_triples(
         f"候选目标：\n{candidate_lines}\n\n"
         f"Memory Stream:\n{record_text}"
     )
-    raw_text = _call_deepseek_json(
+    raw_text = await _call_deepseek_json(
         "你只输出 JSON 数组，不解释。",
         prompt,
         max_tokens=1400,
@@ -445,7 +445,7 @@ def _extract_graph_triples(
     return triples
 
 
-def _analyze_relationship_changes(
+async def _analyze_relationship_changes(
     source_agent: models.Agent,
     candidate_agents: list[models.Agent],
     records: list[str],
@@ -473,7 +473,7 @@ def _analyze_relationship_changes(
         f"过去 24 小时记录：\n{record_text}"
     )
 
-    raw_text = _call_deepseek_json(
+    raw_text = await _call_deepseek_json(
         "你是社会关系图谱分析器，只输出 JSON。",
         prompt,
         max_tokens=700,
@@ -585,7 +585,7 @@ def _relationship_changes_from_triples(
     ]
 
 
-def _daily_event_summaries(
+async def _daily_event_summaries(
     source_agent: models.Agent,
     records: list[str],
 ) -> list[str]:
@@ -602,7 +602,7 @@ def _daily_event_summaries(
         f"Agent: id={source_agent.id}, name={source_agent.agent_name}\n"
         f"Memory Stream:\n{record_text}"
     )
-    raw_text = _call_deepseek_json(
+    raw_text = await _call_deepseek_json(
         "你只输出 JSON 数组。",
         prompt,
         max_tokens=1000,
@@ -638,18 +638,18 @@ def _create_daily_events(
     return len(events)
 
 
-def _deep_reflect_on_events(
+async def _deep_reflect_on_events(
     source_agent: models.Agent,
     events: list[models.ReflectionEvent],
 ) -> str:
     """Layer 3: infer high-level self traits and long-range patterns."""
-    return _deep_reflect_on_event_texts(
+    return await _deep_reflect_on_event_texts(
         source_agent=source_agent,
         event_texts=[event.content for event in events],
     )
 
 
-def _deep_reflect_on_event_texts(
+async def _deep_reflect_on_event_texts(
     source_agent: models.Agent,
     event_texts: list[str],
 ) -> str:
@@ -666,7 +666,7 @@ def _deep_reflect_on_event_texts(
         f"Agent: id={source_agent.id}, name={source_agent.agent_name}\n"
         f"Daily Events:\n{event_text}"
     )
-    raw_text = _call_deepseek_json(
+    raw_text = await _call_deepseek_json(
         "你只输出反思文本。",
         prompt,
         max_tokens=900,
@@ -677,7 +677,7 @@ def _deep_reflect_on_event_texts(
     return insight
 
 
-def _maybe_create_high_level_insight(
+async def _maybe_create_high_level_insight(
     db: Session,
     source_agent: models.Agent,
     user_id: int,
@@ -691,7 +691,7 @@ def _maybe_create_high_level_insight(
         f"[Reflection Triggered] Event count reached threshold. "
         f"Initiating high-level reflection.",
     )
-    insight = _deep_reflect_on_events(source_agent, pending_events)
+    insight = await _deep_reflect_on_events(source_agent, pending_events)
     if not insight:
         return 0, False
     logger.info(f"[Insight Generated] \n{insight}")
@@ -731,7 +731,7 @@ def _pending_daily_events(
     )
 
 
-def _plan_high_level_insight(
+async def _plan_high_level_insight(
     db: Session,
     source_agent: models.Agent,
     planned_daily_events: list[str],
@@ -750,7 +750,7 @@ def _plan_high_level_insight(
         f"[Reflection Triggered] Event count reached threshold. "
         f"Initiating high-level reflection.",
     )
-    insight = _deep_reflect_on_event_texts(
+    insight = await _deep_reflect_on_event_texts(
         source_agent=source_agent,
         event_texts=reflection_texts[:REFLECTION_BATCH_SIZE],
     )
@@ -930,7 +930,7 @@ def clear_graph_working_memory(
     )
 
 
-def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, Any]:
+async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, Any]:
     """Convert one user's daily short-term traces into long memory and relations."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None or user.agent is None:
@@ -953,18 +953,22 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
 
     try:
         if records:
-            scored_memories = _score_episodic_memories(source_agent, records)
-            daily_events = _daily_event_summaries(source_agent, records)
-            high_level_insight = _plan_high_level_insight(
+            scored_memories = await _score_episodic_memories(source_agent, records)
+            daily_events = await _daily_event_summaries(source_agent, records)
+            high_level_insight = await _plan_high_level_insight(
                 db=db,
                 source_agent=source_agent,
                 planned_daily_events=daily_events,
             )
 
-        graph_triples = _extract_graph_triples(source_agent, candidate_agents, records)
+        graph_triples = await _extract_graph_triples(
+            source_agent,
+            candidate_agents,
+            records,
+        )
         relationship_changes = _relationship_changes_from_triples(graph_triples)
         if not relationship_changes:
-            relationship_changes = _analyze_relationship_changes(
+            relationship_changes = await _analyze_relationship_changes(
                 source_agent=source_agent,
                 candidate_agents=candidate_agents,
                 records=records,
@@ -984,7 +988,7 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
         )
 
     if records:
-        chunks_added = add_scored_memories(
+        chunks_added = await add_scored_memories(
             user_id=user_id,
             agent_id=source_agent.id,
             memories=scored_memories,
@@ -1036,16 +1040,16 @@ def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, An
     }
 
 
-def consolidate_daily_memory(
+async def consolidate_daily_memory(
     user_id: int,
     db: Session | None = None,
 ) -> dict[str, Any]:
     """Run one daily memory-consolidation cycle for a user's agent."""
     if db is not None:
-        return _consolidate_daily_memory_with_db(db, user_id)
+        return await _consolidate_daily_memory_with_db(db, user_id)
 
     owned_db = SessionLocal()
     try:
-        return _consolidate_daily_memory_with_db(owned_db, user_id)
+        return await _consolidate_daily_memory_with_db(owned_db, user_id)
     finally:
         owned_db.close()

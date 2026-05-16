@@ -102,7 +102,7 @@ def _build_suggestion_context(
     "/suggestions",
     response_model=list[CounterfactualSuggestion],
 )
-def suggest_counterfactual_decision_points(
+async def suggest_counterfactual_decision_points(
     days: int = Query(90, ge=1, le=365),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -114,7 +114,7 @@ def suggest_counterfactual_decision_points(
 
     return [
         CounterfactualSuggestion(**suggestion)
-        for suggestion in suggest_counterfactual_anchors(context)
+        for suggestion in await suggest_counterfactual_anchors(context)
     ]
 
 
