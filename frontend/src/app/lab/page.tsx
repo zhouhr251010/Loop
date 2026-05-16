@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
@@ -9,12 +9,20 @@ import {
   Agent,
   AgentDeletionResponse,
   AgentSessionChoice,
+  AuthSession,
+  GlobalSystemSettings,
   HealthResponse,
   PostOut,
   apiRequest,
   formatAgentChoiceLabel,
 } from "@/lib/api";
-import { LoopSession, getAccessToken, loadSession, saveSession } from "@/lib/session";
+import {
+  LoopSession,
+  getAccessToken,
+  loadSession,
+  saveAdminBackupSession,
+  saveSession,
+} from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
 
 type ExportKind = "chatlogs" | "feedbacks";
@@ -49,12 +57,13 @@ export default function LabPage() {
   const { t } = useLanguage();
   const copy = t.lab;
   const [session, setSession] = useState<LoopSession | null>(null);
-  const [adminKey, setAdminKey] = useState("");
   const [targetAgentId, setTargetAgentId] = useState("");
   const [targetUsername, setTargetUsername] = useState("");
   const [targetBranch, setTargetBranch] = useState(DEFAULT_BRANCH_ID);
   const [purgeBranchId, setPurgeBranchId] = useState(DEFAULT_BRANCH_ID);
   const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
+  const [allowUserBranchSwitch, setAllowUserBranchSwitch] = useState(false);
+  const [globalActiveBranch, setGlobalActiveBranch] = useState(DEFAULT_BRANCH_ID);
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [singlePost, setSinglePost] = useState<PostOut | null>(null);
@@ -74,10 +83,12 @@ export default function LabPage() {
   const [isExporting, setIsExporting] = useState<ExportKind | null>(null);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [isLoadingSettings, setIsLoadingSettings] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isPurgingBranch, setIsPurgingBranch] = useState(false);
   const [isDeletingAgent, setIsDeletingAgent] = useState(false);
-
-  const hasAdminKey = useMemo(() => adminKey.trim().length > 0, [adminKey]);
+  const [impersonatingAgentId, setImpersonatingAgentId] = useState<number | null>(null);
+  const settingBranches = normalizeBranches([globalActiveBranch, ...branches]);
 
   useEffect(() => {
     async function bootstrap() {
@@ -86,10 +97,15 @@ export default function LabPage() {
         router.replace("/");
         return;
       }
+      if (!storedSession.is_admin) {
+        router.replace("/plaza");
+        return;
+      }
 
       setSession(storedSession);
       setTargetUsername(storedSession.username);
       void loadBranches();
+      void loadSettings();
       if (storedSession.agent_id) {
         setTargetAgentId(String(storedSession.agent_id));
         return;
@@ -113,12 +129,6 @@ export default function LabPage() {
 
     bootstrap();
   }, [router]);
-
-  function adminHeaders() {
-    return {
-      "X-Loop-Admin-Key": adminKey.trim(),
-    };
-  }
 
   async function loadBranches() {
     setIsLoadingBranches(true);
@@ -146,20 +156,61 @@ export default function LabPage() {
     }
   }
 
-  async function loadAgentChoices() {
-    if (!hasAdminKey) {
-      return;
+  async function loadSettings() {
+    setIsLoadingSettings(true);
+    try {
+      const settings = await apiRequest<GlobalSystemSettings>(
+        "/api/simulation/settings",
+      );
+      const branchId = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+      setAllowUserBranchSwitch(settings.allow_user_branch_switch);
+      setGlobalActiveBranch(branchId);
+      setBranches((currentBranches) =>
+        normalizeBranches([branchId, ...currentBranches]),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.settingsLoadFailed);
+    } finally {
+      setIsLoadingSettings(false);
     }
+  }
 
+  async function saveSettings() {
+    setError("");
+    setMessage("");
+    setIsSavingSettings(true);
+    try {
+      const settings = await apiRequest<GlobalSystemSettings>(
+        "/api/simulation/settings",
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            allow_user_branch_switch: allowUserBranchSwitch,
+            global_active_branch: globalActiveBranch,
+          }),
+        },
+      );
+      const branchId = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+      setAllowUserBranchSwitch(settings.allow_user_branch_switch);
+      setGlobalActiveBranch(branchId);
+      setBranches((currentBranches) =>
+        normalizeBranches([branchId, ...currentBranches]),
+      );
+      setMessage(copy.settingsSaved(branchId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.settingsSaveFailed);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  }
+
+  async function loadAgentChoices() {
     setError("");
     setMessage("");
     setIsLoadingAgents(true);
     try {
       const choices = await apiRequest<AgentSessionChoice[]>(
         "/api/users/agent-choices",
-        {
-          headers: adminHeaders(),
-        },
       );
       setAgentChoices(choices);
       setAgentDeleteResult(null);
@@ -181,6 +232,40 @@ export default function LabPage() {
 
     setTargetAgentId(String(choice.agent.id));
     setTargetUsername(choice.user.username);
+  }
+
+  async function impersonateAgent(choice: AgentSessionChoice) {
+    if (!session?.is_admin) {
+      setError(copy.noAgentForSession);
+      return;
+    }
+
+    setError("");
+    setMessage("");
+    setImpersonatingAgentId(choice.agent.id);
+    try {
+      const authSession = await apiRequest<AuthSession>(
+        `/api/users/agent-choices/${choice.agent.id}/session`,
+        { method: "POST" },
+      );
+      saveAdminBackupSession(session);
+      saveSession({
+        user_id: authSession.user.id,
+        username: authSession.user.username,
+        is_admin: authSession.user.is_admin,
+        access_token: authSession.access_token,
+        token_expires_at: Date.now() + authSession.expires_in * 1000,
+        agent_id: choice.agent.id,
+        agent_name: choice.agent.agent_name,
+        agent_is_npc: choice.agent.is_npc,
+      });
+      setMessage(copy.impersonated(choice.user.username));
+      window.location.href = "/chat";
+    } catch (err) {
+      setError(err instanceof Error ? err.message : copy.impersonateFailed);
+    } finally {
+      setImpersonatingAgentId(null);
+    }
   }
 
   function updateTargetBranch(branchId: string) {
@@ -211,7 +296,7 @@ export default function LabPage() {
 
   async function simulateOne(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!hasAdminKey || !targetUsername.trim()) {
+    if (!targetUsername.trim()) {
       return;
     }
 
@@ -223,7 +308,6 @@ export default function LabPage() {
         SIMULATE_USER_POST_ENDPOINT(targetUsername.trim(), targetBranch),
         {
           method: "POST",
-          headers: adminHeaders(),
         },
       );
       setSinglePost(post);
@@ -236,10 +320,6 @@ export default function LabPage() {
   }
 
   async function simulateTick() {
-    if (!hasAdminKey) {
-      return;
-    }
-
     setError("");
     setMessage("");
     setIsTicking(true);
@@ -248,7 +328,6 @@ export default function LabPage() {
         SIMULATE_TICK_ENDPOINT(targetBranch),
         {
           method: "POST",
-          headers: adminHeaders(),
         },
       );
       setTickPosts(posts);
@@ -261,7 +340,7 @@ export default function LabPage() {
   }
 
   async function exportJsonl(kind: ExportKind) {
-    if (!hasAdminKey || !targetUsername.trim()) {
+    if (!targetUsername.trim()) {
       return;
     }
 
@@ -275,7 +354,6 @@ export default function LabPage() {
         )}/${kind}?branch_id=${encodeURIComponent(targetBranch)}`,
         {
           headers: {
-            ...adminHeaders(),
             ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
           },
         },
@@ -301,7 +379,7 @@ export default function LabPage() {
   }
 
   async function purgeBranch() {
-    if (!hasAdminKey || !purgeBranchId || purgeBranchId === DEFAULT_BRANCH_ID) {
+    if (!purgeBranchId || purgeBranchId === DEFAULT_BRANCH_ID) {
       return;
     }
     if (!window.confirm(copy.purgeConfirm)) {
@@ -314,7 +392,6 @@ export default function LabPage() {
     try {
       const result = await apiRequest<BranchPurgeResult>(PURGE_BRANCH_ENDPOINT, {
         method: "POST",
-        headers: adminHeaders(),
         body: JSON.stringify({ branch_id: purgeBranchId }),
       });
 
@@ -342,7 +419,7 @@ export default function LabPage() {
   }
 
   async function confirmDeleteAgent() {
-    if (!agentPendingDelete || !hasAdminKey) {
+    if (!agentPendingDelete) {
       return;
     }
 
@@ -355,7 +432,6 @@ export default function LabPage() {
         `/api/agents/${deletingAgentId}`,
         {
           method: "DELETE",
-          headers: adminHeaders(),
         },
       );
       setAgentChoices((choices) =>
@@ -427,20 +503,62 @@ export default function LabPage() {
           </div>
         ) : null}
 
-        <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_190px_220px_220px_auto]">
-            <label className="block">
-              <span className="text-sm font-medium text-gray-700">
-                {t.common.adminApiKey}
+        <section className="mb-5 rounded-xl border border-indigo-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+                {copy.globalStageEyebrow}
+              </p>
+              <h2 className="mt-1 text-lg font-semibold text-gray-950">
+                {copy.globalStageTitle}
+              </h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-gray-500">
+                {copy.globalStageDescription}
+              </p>
+            </div>
+            <button
+              className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isSavingSettings || isLoadingSettings}
+              onClick={saveSettings}
+              type="button"
+            >
+              {isSavingSettings ? t.common.submitting : copy.saveSettings}
+            </button>
+          </div>
+          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)] lg:items-end">
+            <label className="flex min-h-[4.5rem] items-center justify-between gap-4 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <span>
+                <span className="block text-sm font-semibold text-gray-900">
+                  {copy.allowUserBranchSwitch}
+                </span>
+                <span className="mt-1 block text-xs leading-5 text-gray-500">
+                  {copy.allowUserBranchSwitchHelp}
+                </span>
               </span>
               <input
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                onChange={(event) => setAdminKey(event.target.value)}
-                placeholder={copy.adminPlaceholder}
-                type="password"
-                value={adminKey}
+                checked={allowUserBranchSwitch}
+                className="h-5 w-5 accent-gray-950"
+                disabled={isSavingSettings || isLoadingSettings}
+                onChange={(event) => setAllowUserBranchSwitch(event.target.checked)}
+                type="checkbox"
               />
             </label>
+            <BranchSelector
+              branches={settingBranches}
+              disabled={isSavingSettings || isLoadingSettings}
+              isLoading={isLoadingBranches}
+              label={copy.globalActiveBranch}
+              loadingLabel={t.common.loading}
+              onChange={setGlobalActiveBranch}
+              onRefresh={loadBranches}
+              refreshLabel={t.common.refreshBranches}
+              value={globalActiveBranch}
+            />
+          </div>
+        </section>
+
+        <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px_220px_auto]">
             <label className="block">
               <span className="text-sm font-medium text-gray-700">
                 {t.common.username}
@@ -482,7 +600,7 @@ export default function LabPage() {
             <div className="flex items-end">
               <button
                 className="w-full rounded-full bg-gray-950 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 md:w-auto"
-                disabled={!hasAdminKey || isLoadingAgents}
+                disabled={isLoadingAgents}
                 onClick={loadAgentChoices}
                 type="button"
               >
@@ -490,6 +608,58 @@ export default function LabPage() {
               </button>
             </div>
           </div>
+        </section>
+
+        <section className="mb-5 rounded-xl border border-indigo-200 bg-indigo-50/50 p-5 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-950">
+                {copy.impersonationTitle}
+              </h2>
+              <p className="mt-1 text-sm leading-6 text-gray-600">
+                {copy.impersonationDescription}
+              </p>
+            </div>
+            <button
+              className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isLoadingAgents}
+              onClick={loadAgentChoices}
+              type="button"
+            >
+              {isLoadingAgents ? t.common.loading : copy.loadAgents}
+            </button>
+          </div>
+          {agentChoices.length > 0 ? (
+            <div className="mt-4 overflow-hidden rounded-lg border border-indigo-100 bg-white">
+              <div className="divide-y divide-gray-100">
+                {agentChoices.map((choice) => (
+                  <div
+                    className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                    key={choice.agent.id}
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-gray-950">
+                        {formatAgentChoiceLabel(choice)}
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Agent #{choice.agent.id} · User #{choice.user.id}
+                      </p>
+                    </div>
+                    <button
+                      className="rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:border-indigo-300 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={impersonatingAgentId === choice.agent.id}
+                      onClick={() => impersonateAgent(choice)}
+                      type="button"
+                    >
+                      {impersonatingAgentId === choice.agent.id
+                        ? copy.impersonating
+                        : copy.impersonate}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
 
         {agentChoices.length > 0 || agentDeleteResult ? (
@@ -505,7 +675,7 @@ export default function LabPage() {
               </div>
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || isLoadingAgents}
+                disabled={isLoadingAgents}
                 onClick={loadAgentChoices}
                 type="button"
               >
@@ -537,7 +707,7 @@ export default function LabPage() {
                       </div>
                       <button
                         className="rounded-full border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-700 transition hover:border-rose-300 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                        disabled={!hasAdminKey || isDeletingAgent}
+                        disabled={isDeletingAgent}
                         onClick={() => requestDeleteAgent(choice)}
                         type="button"
                       >
@@ -613,7 +783,7 @@ export default function LabPage() {
             <div className="mt-4 flex flex-wrap gap-3">
               <button
                 className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || !targetUsername || isExporting !== null}
+                disabled={!targetUsername || isExporting !== null}
                 onClick={() => exportJsonl("chatlogs")}
                 type="button"
               >
@@ -621,7 +791,7 @@ export default function LabPage() {
               </button>
               <button
                 className="rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || !targetUsername || isExporting !== null}
+                disabled={!targetUsername || isExporting !== null}
                 onClick={() => exportJsonl("feedbacks")}
                 type="button"
               >
@@ -654,7 +824,7 @@ export default function LabPage() {
                 </div>
                 <button
                   className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!hasAdminKey || !targetUsername || isSimulatingOne}
+                  disabled={!targetUsername || isSimulatingOne}
                   type="submit"
                 >
                   {isSimulatingOne ? copy.generating : copy.generatePost}
@@ -676,7 +846,7 @@ export default function LabPage() {
               </div>
               <button
                 className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || isTicking}
+                disabled={isTicking}
                 onClick={simulateTick}
                 type="button"
               >
@@ -709,30 +879,26 @@ export default function LabPage() {
               </p>
             </div>
             <div className="grid w-full gap-3 sm:grid-cols-[minmax(0,1fr)_auto] lg:max-w-xl">
-              <label className="block">
-                <span className="text-sm font-medium text-rose-900">
-                  {copy.branchToPurge}
-                </span>
-                <select
-                  className="mt-2 w-full rounded-xl border border-rose-200 bg-white px-4 py-3 text-sm text-rose-950 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
-                  disabled={isLoadingBranches || isPurgingBranch}
-                  onChange={(event) => setPurgeBranchId(event.target.value)}
-                  value={purgeBranchId}
-                >
-                  {branches.map((branchId) => (
-                    <option key={branchId} value={branchId}>
-                      {branchId === DEFAULT_BRANCH_ID
-                        ? `${branchId} (${t.common.protected})`
-                        : branchId}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <BranchSelector
+                branches={branches}
+                disabled={isPurgingBranch}
+                isLoading={isLoadingBranches}
+                label={copy.branchToPurge}
+                loadingLabel={t.common.loading}
+                onChange={setPurgeBranchId}
+                onRefresh={loadBranches}
+                optionLabel={(branchId) =>
+                  branchId === DEFAULT_BRANCH_ID
+                    ? `${branchId} (${t.common.protected})`
+                    : branchId
+                }
+                refreshLabel={t.common.refreshBranches}
+                value={purgeBranchId}
+              />
               <div className="flex items-end">
                 <button
                   className="w-full rounded-full bg-rose-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                   disabled={
-                    !hasAdminKey ||
                     purgeBranchId === DEFAULT_BRANCH_ID ||
                     isPurgingBranch
                   }
@@ -817,7 +983,7 @@ export default function LabPage() {
               </button>
               <button
                 className="rounded-full bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={!hasAdminKey || isDeletingAgent}
+                disabled={isDeletingAgent}
                 onClick={confirmDeleteAgent}
                 type="button"
               >

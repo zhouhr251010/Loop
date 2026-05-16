@@ -56,6 +56,7 @@ class UserOut(BaseModel):
 
     id: int
     username: str
+    is_admin: bool = False
     mbti_type: str | None = None
     big_five_scores: dict[str, Any] | None = None
     schwartz_values: dict[str, Any] | None = None

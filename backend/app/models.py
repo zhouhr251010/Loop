@@ -37,11 +37,23 @@ class ProbeResponse(Base):
         index=True,
     )
     user_id = Column(String(128), nullable=False, index=True)
+    branch_id = Column(String(128), default="main", nullable=False, index=True)
     probe_set = Column(String(64), nullable=False, index=True)
     probe_id = Column(String(128), nullable=False, index=True)
     answer = Column(JSON, nullable=False)
     responder = Column(String(16), nullable=False, index=True)
     timestamp = Column(DateTime, default=utc_now_seconds, nullable=False, index=True)
+
+
+class SystemSetting(Base):
+    """Singleton global experiment controls for participant-facing exposure."""
+
+    __tablename__ = "system_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    allow_user_branch_switch = Column(Boolean, default=False, nullable=False)
+    global_active_branch = Column(String(128), default="main", nullable=False)
+    updated_at = Column(DateTime, default=utc_now_seconds, nullable=False)
 
 
 class User(Base):
@@ -53,6 +65,7 @@ class User(Base):
     username = Column(String(64), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=utc_now_seconds, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False, index=True)
     mbti_type = Column(String(16), nullable=True)
     big_five_scores = Column(JSON, nullable=True)
     schwartz_values = Column(JSON, nullable=True)

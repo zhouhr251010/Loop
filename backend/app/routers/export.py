@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.crud import user as user_crud
 from app.database import get_db
-from app.security import require_admin_key
+from app.security import require_admin
 from app.services.export_service import (
     export_chatlogs_to_jsonl,
     export_feedback_to_jsonl,
@@ -32,7 +32,7 @@ def export_user_chatlogs(
     user_id: int,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin: object = Depends(require_admin),
 ) -> Response:
     """Download one user's private chat logs as SFT JSONL."""
     content = export_chatlogs_to_jsonl(db=db, user_id=user_id, branch_id=branch_id)
@@ -47,7 +47,7 @@ def export_username_chatlogs(
     username: str,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin: object = Depends(require_admin),
 ) -> Response:
     """Download one user's private chat logs by username."""
     db_user = user_crud.get_user_by_username(db, username.strip())
@@ -73,7 +73,7 @@ def export_user_feedbacks(
     user_id: int,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin: object = Depends(require_admin),
 ) -> Response:
     """Download one user's correction feedback as SFT JSONL."""
     content = export_feedback_to_jsonl(db=db, user_id=user_id, branch_id=branch_id)
@@ -88,7 +88,7 @@ def export_username_feedbacks(
     username: str,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin: object = Depends(require_admin),
 ) -> Response:
     """Download one user's correction feedback by username."""
     db_user = user_crud.get_user_by_username(db, username.strip())

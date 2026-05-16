@@ -61,6 +61,19 @@ def _secret_key() -> str:
     return os.getenv("LOOP_AUTH_SECRET") or _runtime_secret
 
 
+def get_configured_admin_username() -> str:
+    """Return the bearer-login admin username configured in .env."""
+    return os.getenv("LOOP_ADMIN_USERNAME", "").strip()
+
+
+def is_configured_admin_username(username: str) -> bool:
+    """Return whether a requested username is reserved for the admin account."""
+    configured_username = get_configured_admin_username()
+    if not configured_username:
+        return False
+    return hmac.compare_digest(username.lower(), configured_username.lower())
+
+
 def get_async_redis_client() -> Redis | None:
     """Return the process-local async Redis client when Redis is configured."""
     global _redis_client
@@ -101,6 +114,7 @@ def create_access_token(user: models.User) -> str:
     payload = {
         "sub": str(user.id),
         "username": user.username,
+        "is_admin": bool(getattr(user, "is_admin", False)),
         "iat": now,
         "exp": now + TOKEN_TTL_SECONDS,
     }
@@ -188,19 +202,53 @@ def require_same_user(user_id: int, current_user: models.User) -> None:
         )
 
 
-def require_admin_key(x_loop_admin_key: str | None = Header(default=None)) -> None:
-    """Protect expensive simulation and research export endpoints."""
+def require_admin(
+    current_user: models.User = Depends(get_current_user),
+) -> models.User:
+    """Require a signed-in research admin user."""
+    if not bool(getattr(current_user, "is_admin", False)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges are required.",
+        )
+    return current_user
+
+
+def require_machine_key(x_loop_admin_key: str | None = Header(default=None)) -> None:
+    """Protect backend automation hooks with a machine-to-machine secret."""
     configured_key = os.getenv("LOOP_ADMIN_API_KEY")
     if not configured_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Admin API key is not configured.",
+            detail="Machine API key is not configured.",
         )
     if not x_loop_admin_key or not hmac.compare_digest(x_loop_admin_key, configured_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Valid X-Loop-Admin-Key is required.",
+            detail="Valid machine key is required.",
         )
+
+
+def require_admin_or_machine_key(
+    authorization: str | None = Header(default=None),
+    x_loop_admin_key: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> models.User | None:
+    """Allow either an admin bearer session or a backend automation key."""
+    if authorization:
+        try:
+            current_user = get_current_user(authorization=authorization, db=db)
+        except HTTPException:
+            current_user = None
+        if current_user is not None and bool(getattr(current_user, "is_admin", False)):
+            return current_user
+        if current_user is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin privileges are required.",
+            )
+    require_machine_key(x_loop_admin_key=x_loop_admin_key)
+    return None
 
 
 def _warn_rate_limiter_unavailable(message: str, exc: Exception | None = None) -> None:

@@ -4,11 +4,17 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.models import utc_now_seconds
+from app.services.branching import DEFAULT_BRANCH_ID, branch_scope_ids, normalize_branch_id
 from app.services.event_store import append_event
 
 RECENT_CHAT_HISTORY_TURNS = 30
 HISTORICAL_CHAT_LOG_MIN_TURNS = 5
 HISTORICAL_CHAT_LOG_MAX_TURNS = 50
+
+
+def _chat_replay_sort_key(row: models.ChatLog) -> tuple[object, int, int]:
+    branch_rank = 0 if normalize_branch_id(row.branch_id) == DEFAULT_BRANCH_ID else 1
+    return (row.timestamp, branch_rank, int(row.id or 0))
 
 
 def create_chat_log(
@@ -22,7 +28,7 @@ def create_chat_log(
     topic: str = "general",
 ) -> models.ChatLog:
     """Persist a user-agent private chat turn with second-level precision."""
-    normalized_branch_id = (branch_id or "main").strip() or "main"
+    normalized_branch_id = normalize_branch_id(branch_id)
     normalized_session_id = (
         (session_id or "default_session").strip() or "default_session"
     )
@@ -81,7 +87,7 @@ def get_recent_chat_logs(
     safe_limit = max(1, min(limit, RECENT_CHAT_HISTORY_TURNS))
     filters = [
         models.ChatLog.agent_id == agent_id,
-        models.ChatLog.branch_id == normalized_branch_id,
+        models.ChatLog.branch_id.in_(branch_scope_ids(normalized_branch_id)),
         models.ChatLog.session_id == normalized_session_id,
     ]
     if topic is not None:
@@ -93,7 +99,7 @@ def get_recent_chat_logs(
         .limit(safe_limit)
         .all()
     )
-    return list(reversed(rows))
+    return sorted(rows, key=_chat_replay_sort_key)
 
 
 def get_historical_chat_logs(
@@ -106,7 +112,7 @@ def get_historical_chat_logs(
     skip_recent_turns: int = RECENT_CHAT_HISTORY_TURNS,
 ) -> list[models.ChatLog]:
     """Return older branch-scoped chat turns for model tool lookups."""
-    normalized_branch_id = (branch_id or "main").strip() or "main"
+    normalized_branch_id = normalize_branch_id(branch_id)
     normalized_session_id = (
         (session_id or "default_session").strip() or "default_session"
     )
@@ -118,7 +124,7 @@ def get_historical_chat_logs(
     safe_skip = max(0, skip_recent_turns)
     filters = [
         models.ChatLog.agent_id == agent_id,
-        models.ChatLog.branch_id == normalized_branch_id,
+        models.ChatLog.branch_id.in_(branch_scope_ids(normalized_branch_id)),
         models.ChatLog.session_id == normalized_session_id,
     ]
     if topic is not None:
@@ -131,4 +137,4 @@ def get_historical_chat_logs(
         .limit(safe_lookback)
         .all()
     )
-    return list(reversed(rows))
+    return sorted(rows, key=_chat_replay_sort_key)

@@ -21,13 +21,14 @@ from app.schemas.memory import (
     MemoryUploadOut,
 )
 from app.schemas.chat_import import ImportedChatBatchCreate, ImportedChatBatchOut
-from app.security import get_current_user, require_same_user
+from app.security import get_current_user, require_admin, require_same_user
 from app.services.consolidation_service import (
     clear_graph_working_memory,
     consolidate_daily_memory,
     inspect_graph_working_memory,
 )
 from app.services.core_memory_service import normalize_core_memory
+from app.services.branching import branch_exists, normalize_branch_id as normalize_global_branch_id
 from app.services.rag_service import (
     add_agent_chat_memories,
     add_memory,
@@ -46,7 +47,7 @@ SLEEP_ACCEPTED_MESSAGE = (
 
 
 def _normalize_branch_id(branch_id: str) -> str:
-    return (branch_id or "").strip() or "main"
+    return normalize_global_branch_id(branch_id)
 
 
 def _format_core_memory_fields(core_memory: dict[str, str]) -> str:
@@ -283,6 +284,16 @@ def _require_owned_agent(
     return db_agent
 
 
+def _require_admin_target_agent(agent_id: int, db: Session) -> models.Agent:
+    db_agent = agent_crud.get_agent(db, agent_id)
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found.",
+        )
+    return db_agent
+
+
 @router.post(
     "/api/agents/me/import_chat",
     response_model=ImportedChatBatchOut,
@@ -291,7 +302,7 @@ def _require_owned_agent(
 async def import_my_agent_group_chat(
     chat_import: ImportedChatBatchCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_admin),
 ) -> ImportedChatBatchOut:
     """Import group-chat history from the authenticated Agent's perspective."""
     db_agent = _require_current_agent(db, current_user)
@@ -307,10 +318,16 @@ async def import_agent_group_chat(
     agent_id: int,
     chat_import: ImportedChatBatchCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_admin),
 ) -> ImportedChatBatchOut:
     """Import group-chat history with target-agent perspective isolation."""
-    db_agent = _require_owned_agent(agent_id, db, current_user)
+    db_agent = _require_admin_target_agent(agent_id, db)
+    branch_id = normalize_global_branch_id(chat_import.branch_id)
+    if not branch_exists(db, branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
     sender_agent_ids = {
         message.sender_agent_id
         for message in chat_import.messages
@@ -345,10 +362,10 @@ async def import_agent_group_chat(
 
     try:
         chunks_added = await add_agent_chat_memories(
-            user_id=current_user.id,
+            user_id=db_agent.user_id,
             target_agent_id=db_agent.id,
             messages=records,
-            branch_id="main",
+            branch_id=branch_id,
             topic=chat_import.topic,
             participant_agent_ids=participant_agent_ids,
             source_id=source_id,

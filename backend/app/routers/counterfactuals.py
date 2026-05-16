@@ -14,6 +14,13 @@ from app.schemas.counterfactuals import (
     CounterfactualSubmitResponse,
 )
 from app.security import get_current_user
+from app.services.access_control import resolve_target_user_for_agent
+from app.services.branching import (
+    DEFAULT_BRANCH_ID,
+    branch_exists,
+    branch_scope_ids,
+    normalize_branch_id,
+)
 from app.services.core_memory_service import normalize_core_memory
 from app.services.event_store import append_event
 from app.services.llm_service import suggest_counterfactual_anchors
@@ -22,6 +29,10 @@ from app.services.llm_service import suggest_counterfactual_anchors
 router = APIRouter(prefix="/api/counterfactuals", tags=["counterfactuals"])
 SUGGESTION_CHAT_LIMIT = 60
 SUGGESTION_POST_LIMIT = 30
+
+
+def _branch_rank(branch_id: str) -> int:
+    return 0 if normalize_branch_id(branch_id) == DEFAULT_BRANCH_ID else 1
 
 
 def _format_anchor_memory(anchor: CounterfactualSubmitRequest) -> str:
@@ -41,25 +52,26 @@ def _format_anchor_memory(anchor: CounterfactualSubmitRequest) -> str:
 
 def _build_suggestion_context(
     db: Session,
-    current_user: models.User,
+    target_user: models.User,
+    target_agent: models.Agent,
     days: int,
+    branch_id: str,
 ) -> str:
     """Collect bounded user-owned text for suggestion generation."""
     since = utc_now_seconds() - timedelta(days=days)
+    normalized_branch_id = normalize_branch_id(branch_id)
+    readable_branches = branch_scope_ids(normalized_branch_id)
     sections: list[str] = []
 
-    autobiography = str(current_user.autobiography or "").strip()
+    autobiography = str(target_user.autobiography or "").strip()
     if autobiography:
         sections.append(f"【数字自传】\n{autobiography[:5000]}")
-
-    agent = current_user.agent
-    if agent is None:
-        return "\n\n".join(sections)
 
     chat_rows = (
         db.query(models.ChatLog)
         .filter(
-            models.ChatLog.agent_id == agent.id,
+            models.ChatLog.agent_id == target_agent.id,
+            models.ChatLog.branch_id.in_(readable_branches),
             models.ChatLog.timestamp >= since,
         )
         .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
@@ -68,7 +80,11 @@ def _build_suggestion_context(
     )
     if chat_rows:
         chat_lines = []
-        for row in reversed(chat_rows):
+        ordered_chat_rows = sorted(
+            chat_rows,
+            key=lambda row: (row.timestamp, _branch_rank(row.branch_id), row.id),
+        )
+        for row in ordered_chat_rows:
             timestamp = row.timestamp.isoformat(sep=" ") if row.timestamp else ""
             chat_lines.append(
                 (
@@ -78,22 +94,36 @@ def _build_suggestion_context(
             )
         sections.append("【近期私聊】\n" + "\n".join(chat_lines))
 
-    post_rows = (
-        db.query(models.Post)
+    post_events = (
+        db.query(models.EventLog)
         .filter(
-            models.Post.agent_id == agent.id,
-            models.Post.timestamp >= since,
+            models.EventLog.agent_id == target_agent.id,
+            models.EventLog.branch_id.in_(readable_branches),
+            models.EventLog.event_type == "POST_CREATED",
+            models.EventLog.timestamp >= since,
         )
-        .order_by(models.Post.timestamp.desc(), models.Post.id.desc())
+        .order_by(models.EventLog.timestamp.desc(), models.EventLog.event_id.desc())
         .limit(SUGGESTION_POST_LIMIT)
         .all()
     )
-    if post_rows:
+    if post_events:
         post_lines = []
-        for row in reversed(post_rows):
+        ordered_post_events = sorted(
+            post_events,
+            key=lambda row: (row.timestamp, _branch_rank(row.branch_id), row.event_id),
+        )
+        for row in ordered_post_events:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            content = str(payload.get("content") or "").strip()
+            if not content and payload.get("post_id") is not None:
+                post = db.get(models.Post, payload.get("post_id"))
+                content = str(post.content if post is not None else "").strip()
+            if not content:
+                continue
             timestamp = row.timestamp.isoformat(sep=" ") if row.timestamp else ""
-            post_lines.append(f"[{timestamp}] {row.content[:800]}")
-        sections.append("【近期广场帖子】\n" + "\n".join(post_lines))
+            post_lines.append(f"[{timestamp}] {content[:800]}")
+        if post_lines:
+            sections.append("【近期广场帖子】\n" + "\n".join(post_lines))
 
     return "\n\n".join(sections)
 
@@ -104,11 +134,30 @@ def _build_suggestion_context(
 )
 async def suggest_counterfactual_decision_points(
     days: int = Query(90, ge=1, le=365),
+    branch_id: str = Query("main", min_length=1, max_length=128),
+    agent_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[CounterfactualSuggestion]:
     """Suggest key life decision points from autobiography and recent records."""
-    context = _build_suggestion_context(db, current_user, days)
+    target_agent, target_user = resolve_target_user_for_agent(
+        db,
+        current_user,
+        agent_id,
+    )
+    normalized_branch_id = normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
+    context = _build_suggestion_context(
+        db,
+        target_user,
+        target_agent,
+        days,
+        normalized_branch_id,
+    )
     if not context.strip():
         return []
 
@@ -129,16 +178,22 @@ def submit_counterfactual_anchor(
     current_user: models.User = Depends(get_current_user),
 ) -> CounterfactualSubmitResponse:
     """Store a counterfactual anchor and append it to persona core memory."""
-    if current_user.agent is None:
+    target_agent, target_user = resolve_target_user_for_agent(
+        db,
+        current_user,
+        anchor.agent_id,
+    )
+    branch_id = normalize_branch_id(anchor.branch_id)
+    if not branch_exists(db, branch_id):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Please complete questionnaire onboarding before adding anchors.",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
         )
-
     timestamp = utc_now_seconds()
     anchor_memory = _format_anchor_memory(anchor)
     payload = {
-        "user_id": current_user.id,
+        "user_id": target_user.id,
+        "branch_id": branch_id,
         "decision_context": anchor.decision_context,
         "actual_choice": anchor.actual_choice,
         "actual_result": anchor.actual_result,
@@ -149,14 +204,15 @@ def submit_counterfactual_anchor(
 
     append_event(
         db,
-        agent_id=current_user.agent.id,
+        agent_id=target_agent.id,
+        branch_id=branch_id,
         event_type="COUNTERFACTUAL_ANCHOR_CREATED",
         payload=payload,
         timestamp=timestamp,
         commit=False,
     )
 
-    core_memory = normalize_core_memory(current_user.core_memory)
+    core_memory = normalize_core_memory(target_user.core_memory)
     existing_traits = core_memory["persona_traits"].strip()
     anchor_line = f"- {anchor_memory}"
     if anchor_memory not in existing_traits:
@@ -164,14 +220,16 @@ def submit_counterfactual_anchor(
             f"{existing_traits}\n{anchor_line}".strip()
         )[-8000:]
 
-    current_user.core_memory = core_memory
+    if branch_id == DEFAULT_BRANCH_ID:
+        target_user.core_memory = core_memory
     append_event(
         db,
-        agent_id=current_user.agent.id,
+        agent_id=target_agent.id,
+        branch_id=branch_id,
         event_type="CORE_MEMORY_UPDATED",
         payload={
             "source": "counterfactual_anchor",
-            "user_id": current_user.id,
+            "user_id": target_user.id,
             "key": "persona_traits",
             "appended_anchor": anchor_memory,
             "core_memory": core_memory,
@@ -181,5 +239,5 @@ def submit_counterfactual_anchor(
     )
 
     db.commit()
-    db.refresh(current_user)
+    db.refresh(target_user)
     return CounterfactualSubmitResponse(saved=True, core_memory_updated=True)

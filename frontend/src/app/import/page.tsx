@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
 import {
   Agent,
@@ -25,6 +26,8 @@ type ParseResult = {
   messages: RawChatMessage[];
   skipped: number;
 };
+
+const DEFAULT_BRANCH_ID = "main";
 
 const TEXT_MESSAGE_PATTERNS: RegExp[] = [
   /^\[?((?:\d{1,4}[./-]\d{1,2}[./-]\d{1,4}),?\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm)?)\]?\s*(?:-|–|—)?\s*([^:：\n]+?)[:：]\s*(.*)$/,
@@ -268,12 +271,14 @@ function ChatImportView() {
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [topicTag, setTopicTag] = useState("");
-  const [adminKey, setAdminKey] = useState("");
+  const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
+  const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [result, setResult] = useState<ChatImportResponse | null>(null);
   const [error, setError] = useState("");
   const [isParsing, setIsParsing] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [isCreatingNpcs, setIsCreatingNpcs] = useState(false);
 
@@ -282,6 +287,10 @@ function ChatImportView() {
       const storedSession = loadSession();
       if (!storedSession) {
         router.replace("/");
+        return;
+      }
+      if (!storedSession.is_admin) {
+        router.replace("/plaza");
         return;
       }
 
@@ -295,9 +304,11 @@ function ChatImportView() {
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
+        void loadBranches();
       } catch {
         setSession(storedSession);
         setError(copy.noAgent);
+        void loadBranches();
       }
     }
 
@@ -445,6 +456,7 @@ function ChatImportView() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: currentBranch,
             messages: mappedMessages,
             topic: topicTag.trim() || null,
           }),
@@ -459,22 +471,11 @@ function ChatImportView() {
   }
 
   async function loadAgentChoices() {
-    const trimmedAdminKey = adminKey.trim();
-    if (!trimmedAdminKey) {
-      setError(copy.adminRequired);
-      return;
-    }
-
     setError("");
     setIsLoadingAgents(true);
     try {
       const choices = await apiRequest<AgentSessionChoice[]>(
         "/api/users/agent-choices",
-        {
-          headers: {
-            "X-Loop-Admin-Key": trimmedAdminKey,
-          },
-        },
       );
       setAgentChoices(choices);
     } catch (err) {
@@ -484,12 +485,24 @@ function ChatImportView() {
     }
   }
 
-  async function createNpcAgentsForUnmappedSenders() {
-    const trimmedAdminKey = adminKey.trim();
-    if (!trimmedAdminKey) {
-      setError(copy.adminRequired);
-      return;
+  async function loadBranches() {
+    setIsLoadingBranches(true);
+    try {
+      const result = await apiRequest<unknown>("/api/simulation/branches");
+      const nextBranches = normalizeBranches(result);
+      setBranches(nextBranches);
+      setCurrentBranch((branchId) =>
+        nextBranches.includes(branchId) ? branchId : DEFAULT_BRANCH_ID,
+      );
+    } catch {
+      setBranches([DEFAULT_BRANCH_ID]);
+      setCurrentBranch(DEFAULT_BRANCH_ID);
+    } finally {
+      setIsLoadingBranches(false);
     }
+  }
+
+  async function createNpcAgentsForUnmappedSenders() {
     if (unmappedSenderIds.length === 0) {
       return;
     }
@@ -501,9 +514,6 @@ function ChatImportView() {
         "/api/users/npc-agents/from-senders",
         {
           method: "POST",
-          headers: {
-            "X-Loop-Admin-Key": trimmedAdminKey,
-          },
           body: JSON.stringify({
             sender_ids: unmappedSenderIds,
           }),
@@ -654,49 +664,63 @@ function ChatImportView() {
                   {copy.filterHelp}
                 </p>
               </div>
-              <div className="mt-4 grid gap-3 md:grid-cols-3">
-                <label className="block">
-                  <span className="text-xs font-medium text-gray-500">
-                    {copy.startDate}
-                  </span>
-                  <input
-                    className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                    max={endDate || undefined}
-                    onChange={(event) => setStartDate(event.target.value)}
-                    type="date"
-                    value={startDate}
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-xs font-medium text-gray-500">
-                    {copy.endDate}
-                  </span>
-                  <input
-                    className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                    min={startDate || undefined}
-                    onChange={(event) => setEndDate(event.target.value)}
-                    type="date"
-                    value={endDate}
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-xs font-medium text-gray-500">
-                    {copy.topicTag}
-                  </span>
-                  <input
-                    className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                    maxLength={80}
-                    onChange={(event) => setTopicTag(event.target.value)}
-                    placeholder={copy.topicPlaceholder}
-                    type="text"
-                    value={topicTag}
-                  />
-                </label>
+              <div className="mt-4 space-y-4">
+                <BranchSelector
+                  branches={branches}
+                  className="max-w-2xl"
+                  disabled={isImporting}
+                  isLoading={isLoadingBranches}
+                  label={t.common.branchSelector}
+                  loadingLabel={t.common.refreshing}
+                  onChange={setCurrentBranch}
+                  onRefresh={loadBranches}
+                  refreshLabel={t.common.refreshBranches}
+                  value={currentBranch}
+                />
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-500">
+                      {copy.startDate}
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      max={endDate || undefined}
+                      onChange={(event) => setStartDate(event.target.value)}
+                      type="date"
+                      value={startDate}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-500">
+                      {copy.endDate}
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      min={startDate || undefined}
+                      onChange={(event) => setEndDate(event.target.value)}
+                      type="date"
+                      value={endDate}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-medium text-gray-500">
+                      {copy.topicTag}
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                      maxLength={80}
+                      onChange={(event) => setTopicTag(event.target.value)}
+                      placeholder={copy.topicPlaceholder}
+                      type="text"
+                      value={topicTag}
+                    />
+                  </label>
+                </div>
               </div>
             </div>
 
             <div className="mt-6">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div className="flex flex-col gap-3">
                 <div>
                   <h2 className="text-base font-semibold text-gray-950">
                     {copy.senderMapping}
@@ -705,26 +729,9 @@ function ChatImportView() {
                     {copy.senderMappingHelp}
                   </p>
                 </div>
-                <div className="flex w-full flex-col gap-2 sm:w-auto sm:min-w-80 sm:flex-row sm:items-end">
-                  <label className="block flex-1">
-                    <span className="text-xs font-medium text-gray-500">
-                      {t.common.adminKey}
-                    </span>
-                    <input
-                      className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 outline-none transition focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                      onChange={(event) => setAdminKey(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void loadAgentChoices();
-                        }
-                      }}
-                      type="password"
-                      value={adminKey}
-                    />
-                  </label>
+                <div className="flex w-full flex-col gap-2 md:flex-row md:flex-wrap md:items-end lg:w-auto">
                   <button
-                    className="rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="shrink-0 rounded-full bg-gray-950 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={isLoadingAgents}
                     onClick={loadAgentChoices}
                     type="button"
@@ -732,7 +739,7 @@ function ChatImportView() {
                     {isLoadingAgents ? t.common.loading : copy.loadAgents}
                   </button>
                   <button
-                    className="rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="shrink-0 rounded-full border border-gray-300 px-4 py-2 text-sm font-medium text-gray-800 transition hover:border-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={
                       isCreatingNpcs ||
                       isParsing ||
@@ -895,6 +902,44 @@ function ChatImportView() {
         </div>
       </div>
     </main>
+  );
+}
+
+function normalizeBranches(result: unknown) {
+  const rawBranches =
+    result && typeof result === "object"
+      ? "branch_ids" in result
+        ? (result as { branch_ids?: unknown }).branch_ids
+        : "branches" in result
+          ? (result as { branches?: unknown }).branches
+          : result
+      : result;
+
+  const branches = Array.isArray(rawBranches)
+    ? rawBranches
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "branch_id" in item) {
+            return String((item as { branch_id: unknown }).branch_id);
+          }
+          return "";
+        })
+        .map((branchId) => branchId.trim())
+        .filter(Boolean)
+    : [];
+
+  return Array.from(new Set([DEFAULT_BRANCH_ID, ...branches])).sort(
+    (left, right) => {
+      if (left === DEFAULT_BRANCH_ID) {
+        return -1;
+      }
+      if (right === DEFAULT_BRANCH_ID) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    },
   );
 }
 

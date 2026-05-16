@@ -5,33 +5,41 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LanguageToggle } from "@/components/LanguageToggle";
 import { useLanguage } from "@/components/LanguageContext";
-import { loadSession } from "@/lib/session";
+import {
+  clearAdminBackupSession,
+  loadAdminBackupSession,
+  loadSession,
+  saveSession,
+} from "@/lib/session";
 
 export function NavBar() {
   const pathname = usePathname();
-  const { language, t } = useLanguage();
+  const { t } = useLanguage();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState("");
-  const isEnglish = language === "en";
-  const desktopNavClass = isEnglish ? "hidden xl:flex" : "hidden lg:flex";
-  const mobileNavClass = isEnglish ? "flex xl:hidden" : "flex lg:hidden";
-  const mobileMenuClass = isEnglish ? "xl:hidden" : "lg:hidden";
-  const dailyItems = [
-    { href: "/plaza", label: t.nav.plaza },
-    { href: "/chat", label: t.nav.chat },
-    { href: "/probes", label: t.nav.probes },
-    { href: "/counterfactuals", label: t.nav.counterfactuals },
-  ];
-  const experimentItems = [
-    { href: "/memory", label: t.nav.memory },
-    { href: "/time-machine", label: t.nav.timeMachine },
-    { href: "/import", label: t.nav.import },
-    { href: "/lab", label: t.nav.lab },
-  ];
-  const navGroups = [
-    { label: t.nav.daily, items: dailyItems },
-    { label: t.nav.experiments, items: experimentItems },
-  ];
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [isImpersonating, setIsImpersonating] = useState(false);
+  const isAdminView = isAdmin && !isImpersonating;
+  const showUserUtility = !isAdminView;
+  const navItems = isAdminView
+    ? [
+        { href: "/lab", label: t.nav.lab },
+        { href: "/time-machine", label: t.nav.timeMachine },
+        { href: "/import", label: t.nav.import },
+      ]
+    : [
+        { href: "/plaza", label: t.nav.plaza },
+        { href: "/chat", label: t.nav.chat },
+        { href: "/memory", label: t.nav.memory },
+        { href: "/probes", label: t.nav.probes },
+        { href: "/counterfactuals", label: t.nav.counterfactuals },
+      ];
+
+  useEffect(() => {
+    const session = loadSession();
+    setIsAdmin(session?.is_admin === true);
+    setIsImpersonating(Boolean(loadAdminBackupSession()));
+  }, [pathname]);
 
   useEffect(() => {
     if (!toast) {
@@ -57,6 +65,18 @@ export function NavBar() {
     } catch {
       setToast(t.nav.inviteFriendCopyFailed);
     }
+  }
+
+  function exitImpersonation() {
+    const adminSession = loadAdminBackupSession();
+    if (!adminSession) {
+      setIsImpersonating(false);
+      return;
+    }
+    saveSession(adminSession);
+    clearAdminBackupSession();
+    setMobileMenuOpen(false);
+    window.location.href = "/lab";
   }
 
   if (pathname === "/site-login") {
@@ -85,42 +105,34 @@ export function NavBar() {
         >
           Loop
         </Link>
-        <div
-          className={`${desktopNavClass} min-w-0 flex-1 items-center justify-end gap-3`}
-        >
-          <div className="flex min-w-0 flex-1 items-center justify-center">
-            <div className="flex min-w-0 items-center gap-2 rounded-[28px] border border-gray-200 bg-gray-50/90 px-2 py-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
-              {navGroups.map((group, index) => (
-                <div className="flex min-w-0 items-center gap-1.5" key={group.label}>
-                  <div className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-400 shadow-sm">
-                    {group.label}
-                  </div>
-                  <div className="flex min-w-0 items-center gap-1">
-                    {group.items.map((item) => (
-                      <NavLink
-                        href={item.href}
-                        isActive={isActivePath(pathname, item.href)}
-                        key={item.href}
-                        label={item.label}
-                      />
-                    ))}
-                  </div>
-                  {index < navGroups.length - 1 ? (
-                    <div className="mx-1 h-6 w-px bg-gray-200" />
-                  ) : null}
-                </div>
-              ))}
-            </div>
+        <div className="hidden min-w-0 flex-1 items-center justify-end gap-3 lg:flex">
+          <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5">
+            {navItems.map((item) => (
+              <NavLink
+                href={item.href}
+                isActive={isActivePath(pathname, item.href)}
+                key={item.href}
+                label={item.label}
+              />
+            ))}
           </div>
-          <div className="flex shrink-0 items-center gap-2 rounded-full border border-gray-200 bg-white/95 p-1 shadow-sm">
-            <InviteFriendButton
-              label={t.nav.inviteFriendBlindTest}
-              onClick={copyEvaluationLink}
-            />
+          <div className="flex shrink-0 items-center gap-2">
+            {isImpersonating ? (
+              <ExitImpersonationButton
+                label={t.nav.exitImpersonation}
+                onClick={exitImpersonation}
+              />
+            ) : null}
+            {showUserUtility ? (
+              <InviteFriendButton
+                label={t.nav.inviteFriendBlindTest}
+                onClick={copyEvaluationLink}
+              />
+            ) : null}
             <LanguageToggle className="shrink-0" />
           </div>
         </div>
-        <div className={`${mobileNavClass} items-center gap-2`}>
+        <div className="flex items-center gap-2 lg:hidden">
           <LanguageToggle className="shrink-0" />
           <button
             aria-controls="mobile-nav-menu"
@@ -141,33 +153,33 @@ export function NavBar() {
       </div>
       {mobileMenuOpen ? (
         <div
-          className={`border-t border-gray-200 bg-white px-4 py-4 shadow-sm ${mobileMenuClass}`}
+          className="border-t border-gray-200 bg-white px-4 py-4 shadow-sm lg:hidden"
           id="mobile-nav-menu"
         >
-          <div className="mx-auto grid max-w-7xl gap-4">
-            {navGroups.map((group) => (
-              <div key={group.label}>
-                <p className="px-2 text-xs font-semibold uppercase tracking-wide text-gray-400">
-                  {group.label}
-                </p>
-                <div className="mt-2 grid gap-1">
-                  {group.items.map((item) => (
-                    <NavLink
-                      href={item.href}
-                      isActive={isActivePath(pathname, item.href)}
-                      key={item.href}
-                      label={item.label}
-                      onClick={() => setMobileMenuOpen(false)}
-                    />
-                  ))}
-                </div>
-              </div>
+          <div className="mx-auto grid max-w-7xl gap-1">
+            {navItems.map((item) => (
+              <NavLink
+                href={item.href}
+                isActive={isActivePath(pathname, item.href)}
+                key={item.href}
+                label={item.label}
+                onClick={() => setMobileMenuOpen(false)}
+              />
             ))}
-            <InviteFriendButton
-              className="justify-center"
-              label={t.nav.inviteFriendBlindTest}
-              onClick={copyEvaluationLink}
-            />
+            {isImpersonating ? (
+              <ExitImpersonationButton
+                className="mt-3 justify-center"
+                label={t.nav.exitImpersonation}
+                onClick={exitImpersonation}
+              />
+            ) : null}
+            {showUserUtility ? (
+              <InviteFriendButton
+                className="justify-center"
+                label={t.nav.inviteFriendBlindTest}
+                onClick={copyEvaluationLink}
+              />
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -181,6 +193,26 @@ export function NavBar() {
         </div>
       ) : null}
     </nav>
+  );
+}
+
+function ExitImpersonationButton({
+  className = "",
+  label,
+  onClick,
+}: {
+  className?: string;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={`inline-flex h-9 shrink-0 items-center whitespace-nowrap rounded-full border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-700 shadow-sm transition hover:border-rose-300 hover:bg-rose-100 hover:text-rose-800 ${className}`}
+      onClick={onClick}
+      type="button"
+    >
+      {label}
+    </button>
   );
 }
 

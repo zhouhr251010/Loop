@@ -7,6 +7,7 @@ import { useLanguage } from "@/components/LanguageContext";
 import {
   Agent,
   AgentWorkingMemoryState,
+  GlobalSystemSettings,
   MemoryConsolidationAcceptedResponse,
   MemoryConsolidationResponse,
   MemorySearchResponse,
@@ -45,6 +46,8 @@ export default function MemoryPage() {
   const [session, setSession] = useState<LoopSession | null>(null);
   const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
   const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
+  const [systemSettings, setSystemSettings] =
+    useState<GlobalSystemSettings | null>(null);
   const [content, setContent] = useState("");
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(3);
@@ -63,6 +66,8 @@ export default function MemoryPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const canSwitchBranches =
+    session?.is_admin === true || systemSettings?.allow_user_branch_switch === true;
 
   useEffect(() => {
     async function bootstrap() {
@@ -71,6 +76,28 @@ export default function MemoryPage() {
         router.replace("/");
         return;
       }
+
+      let initialBranch = DEFAULT_BRANCH_ID;
+      let allowInitialBranchSwitch = storedSession.is_admin;
+      if (!storedSession.is_admin) {
+        try {
+          const settings = await apiRequest<GlobalSystemSettings>(
+            "/api/simulation/settings",
+          );
+          initialBranch = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+          allowInitialBranchSwitch = settings.allow_user_branch_switch;
+          setSystemSettings(settings);
+          setBranches((currentBranches) =>
+            Array.from(new Set([initialBranch, ...currentBranches])),
+          );
+        } catch {
+          setSystemSettings({
+            allow_user_branch_switch: false,
+            global_active_branch: DEFAULT_BRANCH_ID,
+          });
+        }
+      }
+      setCurrentBranch(initialBranch);
 
       try {
         const agent = await apiRequest<Agent>("/api/users/me/agent");
@@ -82,8 +109,10 @@ export default function MemoryPage() {
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
-        void loadBranches(hydratedSession.agent_id);
-        await refreshDiagnostics(hydratedSession, DEFAULT_BRANCH_ID);
+        if (allowInitialBranchSwitch) {
+          void loadBranches(hydratedSession.agent_id);
+        }
+        await refreshDiagnostics(hydratedSession, initialBranch);
       } catch {
         setSession(storedSession);
         setError(copy.noAgent);
@@ -316,33 +345,35 @@ export default function MemoryPage() {
               {isRefreshing ? t.common.refreshing : copy.refreshDiagnostics}
             </button>
           </div>
-          <div className="mt-5 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p
-                className={`text-xs font-semibold uppercase tracking-wide ${
-                  currentBranch === DEFAULT_BRANCH_ID
-                    ? "text-gray-500"
-                    : "text-purple-600"
-                }`}
-              >
-                {copy.currentTimeline}
-              </p>
-              <p className="mt-1 text-sm font-medium text-gray-700">
-                {copy.currentView(currentBranch)}
-              </p>
+          {canSwitchBranches ? (
+            <div className="mt-5 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p
+                  className={`text-xs font-semibold uppercase tracking-wide ${
+                    currentBranch === DEFAULT_BRANCH_ID
+                      ? "text-gray-500"
+                      : "text-purple-600"
+                  }`}
+                >
+                  {copy.currentTimeline}
+                </p>
+                <p className="mt-1 text-sm font-medium text-gray-700">
+                  {copy.currentView(currentBranch)}
+                </p>
+              </div>
+              <BranchSelector
+                branches={branches}
+                disabled={!session.agent_id || isRefreshing}
+                isLoading={isLoadingBranches}
+                label={t.common.branchSelector}
+                loadingLabel={t.common.loading}
+                onChange={updateCurrentBranch}
+                onRefresh={() => session.agent_id && loadBranches(session.agent_id)}
+                refreshLabel={t.common.refreshBranches}
+                value={currentBranch}
+              />
             </div>
-            <BranchSelector
-              branches={branches}
-              disabled={!session.agent_id || isRefreshing}
-              isLoading={isLoadingBranches}
-              label={t.common.branchSelector}
-              loadingLabel={t.common.loading}
-              onChange={updateCurrentBranch}
-              onRefresh={() => session.agent_id && loadBranches(session.agent_id)}
-              refreshLabel={t.common.refreshBranches}
-              value={currentBranch}
-            />
-          </div>
+          ) : null}
         </header>
 
         {error ? (

@@ -11,7 +11,13 @@ import {
 } from "@/lib/api";
 import { useLanguage } from "@/components/LanguageContext";
 import type { Dictionary } from "@/locales/dictionary";
-import { LoopSession, clearSession, loadSession, saveSession } from "@/lib/session";
+import {
+  LoopSession,
+  clearImpersonationMarker,
+  clearSession,
+  loadSession,
+  saveSession,
+} from "@/lib/session";
 
 const bigFiveFields = [
   "openness",
@@ -77,7 +83,6 @@ export default function OnboardingPage() {
   const [autobiography, setAutobiography] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [adminKey, setAdminKey] = useState("");
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [enteringAgentId, setEnteringAgentId] = useState<number | null>(null);
@@ -94,11 +99,13 @@ export default function OnboardingPage() {
     setExistingSession(session);
   }, [router]);
 
-  function persistAuthSession(authSession: AuthSession, agent?: Agent) {
+  function persistAuthSession(authSession: AuthSession, agent?: Agent): LoopSession {
+    clearImpersonationMarker();
     const tokenExpiresAt = Date.now() + authSession.expires_in * 1000;
-    saveSession({
+    const session: LoopSession = {
       user_id: authSession.user.id,
       username: authSession.user.username,
+      is_admin: authSession.user.is_admin,
       access_token: authSession.access_token,
       token_expires_at: tokenExpiresAt,
       ...(agent
@@ -108,7 +115,9 @@ export default function OnboardingPage() {
             agent_is_npc: agent.is_npc,
           }
         : {}),
-    });
+    };
+    saveSession(session);
+    return session;
   }
 
   function resetLocalSessionForNewUser() {
@@ -127,13 +136,23 @@ export default function OnboardingPage() {
     }
 
     if (existingSession.agent_id) {
+      if (existingSession.is_admin) {
+        router.push("/lab");
+        return;
+      }
       router.push("/plaza");
+      return;
+    }
+
+    if (existingSession.is_admin) {
+      router.push("/lab");
       return;
     }
 
     setUser({
       id: existingSession.user_id,
       username: existingSession.username,
+      is_admin: existingSession.is_admin,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -151,13 +170,26 @@ export default function OnboardingPage() {
           body: JSON.stringify({ username, password }),
         },
       );
-      persistAuthSession(authSession);
+      const storedSession = persistAuthSession(authSession);
+
+      if (authSession.user.is_admin) {
+        setExistingSession(storedSession);
+        router.push("/lab");
+        return;
+      }
 
       try {
         const agent = await apiRequest<Agent>("/api/users/me/agent");
         persistAuthSession(authSession, agent);
         router.push("/plaza");
       } catch {
+        if (authSession.user.is_admin) {
+          setExistingSession(storedSession);
+          setUser(null);
+          setAuthMode("login");
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
         setUser(authSession.user);
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
@@ -194,6 +226,7 @@ export default function OnboardingPage() {
       saveSession({
         user_id: result.user.id,
         username: result.user.username,
+        is_admin: result.user.is_admin,
         access_token: currentSession?.access_token ?? "",
         token_expires_at: currentSession?.token_expires_at,
         agent_id: result.agent.id,
@@ -209,9 +242,8 @@ export default function OnboardingPage() {
   }
 
   async function loadAgentChoices() {
-    const trimmedAdminKey = adminKey.trim();
-    if (!trimmedAdminKey) {
-      setError(copy.adminKeyRequired);
+    if (!existingSession?.is_admin) {
+      setError(copy.adminOnly);
       return;
     }
 
@@ -221,11 +253,6 @@ export default function OnboardingPage() {
     try {
       const choices = await apiRequest<AgentSessionChoice[]>(
         "/api/users/agent-choices",
-        {
-          headers: {
-            "X-Loop-Admin-Key": trimmedAdminKey,
-          },
-        },
       );
       setAgentChoices(choices);
       setAgentChoiceStatus(
@@ -245,9 +272,8 @@ export default function OnboardingPage() {
   }
 
   async function enterAgentChoice(choice: AgentSessionChoice) {
-    const trimmedAdminKey = adminKey.trim();
-    if (!trimmedAdminKey) {
-      setError(copy.adminKeyRequired);
+    if (!existingSession?.is_admin) {
+      setError(copy.adminOnly);
       return;
     }
 
@@ -258,9 +284,6 @@ export default function OnboardingPage() {
         `/api/users/agent-choices/${choice.agent.id}/session`,
         {
           method: "POST",
-          headers: {
-            "X-Loop-Admin-Key": trimmedAdminKey,
-          },
         },
       );
       persistAuthSession(authSession, choice.agent);
@@ -395,6 +418,7 @@ export default function OnboardingPage() {
               </button>
             </form>
 
+            {existingSession?.is_admin ? (
             <section className="space-y-4 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
               <div>
                 <p className="text-sm font-medium uppercase tracking-wide text-gray-500">
@@ -404,38 +428,15 @@ export default function OnboardingPage() {
                   {copy.existingAgentView}
                 </h2>
               </div>
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <label className="block flex-1">
-                  <span className="text-sm font-medium text-gray-700">
-                    {t.common.adminKey}
-                  </span>
-                  <input
-                    className="mt-2 w-full rounded-xl border border-gray-200 px-4 py-3 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                    type="password"
-                    value={adminKey}
-                    onChange={(event) => {
-                      setAdminKey(event.target.value);
-                      setAgentChoices([]);
-                      setAgentChoiceStatus({ type: "instructions" });
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        void loadAgentChoices();
-                      }
-                    }}
-                  />
-                </label>
-                <div className="flex items-end">
-                  <button
-                    className="rounded-full bg-gray-950 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:opacity-60"
-                    disabled={isLoadingAgents}
-                    onClick={loadAgentChoices}
-                    type="button"
-                  >
-                    {isLoadingAgents ? t.common.loading : copy.loadAgents}
-                  </button>
-                </div>
+              <div className="flex justify-start">
+                <button
+                  className="rounded-full bg-gray-950 px-5 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:opacity-60"
+                  disabled={isLoadingAgents}
+                  onClick={loadAgentChoices}
+                  type="button"
+                >
+                  {isLoadingAgents ? t.common.loading : copy.loadAgents}
+                </button>
               </div>
               <p className="text-sm text-gray-500">
                 {formatAgentChoiceStatus(agentChoiceStatus, copy)}
@@ -478,6 +479,7 @@ export default function OnboardingPage() {
                 </div>
               ) : null}
             </section>
+            ) : null}
           </div>
         ) : (
           <form

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from sqlalchemy import text
 
 from app.database import IS_POSTGRES, SessionLocal
 from app.security import RedisError, get_async_redis_client
+from app.services.branching import DEFAULT_BRANCH_ID, coerce_timestamp, normalize_branch_id
 from app.services.infinity_client import get_infinity_client
 
 
@@ -49,6 +51,8 @@ RAG_WARMUP_DONE_KEY = "loop:rag:warmup_done"
 RAG_WARMUP_LOCK_KEY = "loop:rag:warmup_lock"
 
 logger = logging.getLogger(__name__)
+
+MemoryDocument = dict[str, Any]
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -239,6 +243,54 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(f"{float(value):.12g}" for value in embedding) + "]"
 
 
+def _branch_filter_sql() -> str:
+    """SQL fragment for Git-style branch inheritance in RAG reads."""
+    return """
+      AND (
+        (
+          :branch_id = :main_branch_id
+          AND COALESCE(metadata ->> 'branch_id', :main_branch_id) = :main_branch_id
+        )
+        OR (
+          :branch_id <> :main_branch_id
+          AND COALESCE(metadata ->> 'branch_id', :main_branch_id)
+              IN (:main_branch_id, :branch_id)
+        )
+      )
+    """
+
+
+def _document_from_row(row: Any) -> MemoryDocument | None:
+    content = str(row[0] or "").strip()
+    if not content:
+        return None
+    branch_id = normalize_branch_id(str(row[1] or DEFAULT_BRANCH_ID))
+    memory_timestamp = str(row[2] or "").strip()
+    created_at = row[3] if isinstance(row[3], datetime) else None
+    distance = row[4] if len(row) > 4 else None
+    return {
+        "content": content,
+        "branch_id": branch_id,
+        "memory_timestamp": memory_timestamp,
+        "created_at": created_at,
+        "distance": distance,
+    }
+
+
+def _memory_document_sort_key(document: MemoryDocument) -> tuple[datetime, int, str]:
+    timestamp = coerce_timestamp(document.get("memory_timestamp"))
+    if timestamp is None:
+        timestamp = coerce_timestamp(document.get("created_at"))
+    if not isinstance(timestamp, datetime):
+        timestamp = datetime.min
+    branch_rank = 0 if document.get("branch_id") == DEFAULT_BRANCH_ID else 1
+    return (timestamp, branch_rank, str(document.get("content") or ""))
+
+
+def _sort_memory_documents(documents: list[MemoryDocument]) -> list[MemoryDocument]:
+    return sorted(documents, key=_memory_document_sort_key)
+
+
 def _require_postgres_vector_store() -> None:
     if not IS_POSTGRES:
         raise RuntimeError(
@@ -294,19 +346,23 @@ def _recall_documents_sync(
     query_embedding: list[float],
     limit: int,
     agent_id: int | None = None,
-) -> tuple[list[str], float | str]:
+) -> tuple[list[MemoryDocument], float | str]:
     _require_postgres_vector_store()
     participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
+    normalized_branch_id = normalize_branch_id(branch_id)
     with SessionLocal() as db:
         rows = db.execute(
             text(
-                """
+                f"""
                 SELECT
                     content,
+                    COALESCE(metadata ->> 'branch_id', :main_branch_id) AS document_branch_id,
+                    metadata ->> 'timestamp' AS memory_timestamp,
+                    created_at,
                     embedding <=> CAST(:query_embedding AS vector) AS distance
                 FROM rag_documents
                 WHERE embedding IS NOT NULL
-                  AND metadata ->> 'branch_id' = :branch_id
+                  {_branch_filter_sql()}
                   AND (
                     (
                       metadata ? 'user_id'
@@ -330,15 +386,20 @@ def _recall_documents_sync(
             ),
             {
                 "query_embedding": _vector_literal(query_embedding),
-                "branch_id": branch_id,
+                "branch_id": normalized_branch_id,
+                "main_branch_id": DEFAULT_BRANCH_ID,
                 "user_id": user_id,
                 "agent_id": agent_id,
                 "participant_agent_ids": participant_agent_ids,
                 "limit": limit,
             },
         ).all()
-    documents = [str(row[0]) for row in rows if row[0]]
-    top_score: float | str = float(rows[0][1]) if rows else "N/A"
+    documents = [
+        document
+        for row in rows
+        if (document := _document_from_row(row)) is not None
+    ]
+    top_score: float | str = float(rows[0][4]) if rows else "N/A"
     return documents, top_score
 
 
@@ -347,16 +408,23 @@ def _read_recent_documents_sync(
     branch_id: str,
     limit: int,
     agent_id: int | None = None,
-) -> list[str]:
+) -> list[MemoryDocument]:
     _require_postgres_vector_store()
     participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
+    normalized_branch_id = normalize_branch_id(branch_id)
     with SessionLocal() as db:
         rows = db.execute(
             text(
-                """
-                SELECT content
+                f"""
+                SELECT
+                    content,
+                    COALESCE(metadata ->> 'branch_id', :main_branch_id) AS document_branch_id,
+                    metadata ->> 'timestamp' AS memory_timestamp,
+                    created_at,
+                    NULL AS distance
                 FROM rag_documents
-                WHERE metadata ->> 'branch_id' = :branch_id
+                WHERE TRUE
+                  {_branch_filter_sql()}
                   AND (
                     (
                       metadata ? 'user_id'
@@ -379,14 +447,19 @@ def _read_recent_documents_sync(
                 """,
             ),
             {
-                "branch_id": branch_id,
+                "branch_id": normalized_branch_id,
+                "main_branch_id": DEFAULT_BRANCH_ID,
                 "user_id": user_id,
                 "agent_id": agent_id,
                 "participant_agent_ids": participant_agent_ids,
                 "limit": limit,
             },
         ).all()
-    return [str(row[0]) for row in rows if row[0]]
+    return [
+        document
+        for row in rows
+        if (document := _document_from_row(row)) is not None
+    ]
 
 
 async def _insert_documents(
@@ -410,7 +483,7 @@ async def _recall_documents(
     query_embedding: list[float],
     limit: int,
     agent_id: int | None = None,
-) -> tuple[list[str], float | str]:
+) -> tuple[list[MemoryDocument], float | str]:
     return await asyncio.to_thread(
         _recall_documents_sync,
         user_id,
@@ -426,7 +499,7 @@ async def _read_recent_documents(
     branch_id: str,
     limit: int,
     agent_id: int | None = None,
-) -> list[str]:
+) -> list[MemoryDocument]:
     return await asyncio.to_thread(
         _read_recent_documents_sync,
         user_id,
@@ -757,7 +830,7 @@ async def retrieve_memory(
     if top_k <= 0:
         return []
 
-    normalized_branch_id = (branch_id or "main").strip() or "main"
+    normalized_branch_id = normalize_branch_id(branch_id)
     logger.info(
         "[RAG Engine] Querying Memory Vault source=%s branch_id=%s query=%r",
         source,
@@ -765,12 +838,12 @@ async def retrieve_memory(
         clean_query,
     )
     top_score: float | str = "N/A"
-    recalled_documents: list[str] = []
+    recalled_records: list[MemoryDocument] = []
     if clean_query and _env_flag(VECTOR_RAG_ENABLED_ENV, default=True):
         try:
             query_embedding = await _embed_query(clean_query)
             if query_embedding is not None:
-                recalled_documents, top_score = await _recall_documents(
+                recalled_records, top_score = await _recall_documents(
                     user_id=user_id,
                     branch_id=normalized_branch_id,
                     query_embedding=query_embedding,
@@ -781,9 +854,14 @@ async def retrieve_memory(
             logger.warning("Vector recall failed: %s", exc)
             if _strict_rag_enabled():
                 raise
-            recalled_documents = []
+            recalled_records = []
 
-    recalled_documents = _dedupe_documents(recalled_documents)
+    document_by_content: dict[str, MemoryDocument] = {}
+    for record in recalled_records:
+        document_by_content.setdefault(str(record["content"]), record)
+    recalled_documents = _dedupe_documents(
+        [str(record["content"]) for record in recalled_records],
+    )
     if clean_query and recalled_documents:
         try:
             retrieved = await _rerank_documents(clean_query, recalled_documents, top_k)
@@ -797,7 +875,7 @@ async def retrieve_memory(
 
     fallback_limit = max(FALLBACK_SCAN_LIMIT, top_k, MIN_MEMORY_RESULTS)
     try:
-        fallback_documents = await _read_recent_documents(
+        fallback_records = await _read_recent_documents(
             user_id,
             normalized_branch_id,
             fallback_limit,
@@ -807,7 +885,12 @@ async def retrieve_memory(
         logger.warning("Postgres memory fallback read failed: %s", exc)
         if _strict_rag_enabled() and not retrieved:
             raise
-        fallback_documents = []
+        fallback_records = []
+    for record in fallback_records:
+        document_by_content.setdefault(str(record["content"]), record)
+    fallback_documents = _dedupe_documents(
+        [str(record["content"]) for record in fallback_records],
+    )
 
     if fallback_documents:
         ranked_documents = (
@@ -817,25 +900,43 @@ async def retrieve_memory(
         )
         retrieved.extend(ranked_documents)
 
-    unique_documents: list[str] = []
+    unique_document_records: list[MemoryDocument] = []
     seen: set[str] = set()
     target_count = min(top_k, max(MIN_MEMORY_RESULTS, 1))
     for document in retrieved:
         if document in seen:
             continue
         seen.add(document)
-        unique_documents.append(document)
-        if len(unique_documents) >= top_k:
+        unique_document_records.append(
+            document_by_content.get(
+                document,
+                {"content": document, "branch_id": DEFAULT_BRANCH_ID},
+            ),
+        )
+        if len(unique_document_records) >= top_k:
             break
 
-    if len(unique_documents) < target_count:
+    if len(unique_document_records) < target_count:
         for document in fallback_documents:
             if document in seen:
                 continue
             seen.add(document)
-            unique_documents.append(document)
-            if len(unique_documents) >= target_count or len(unique_documents) >= top_k:
+            unique_document_records.append(
+                document_by_content.get(
+                    document,
+                    {"content": document, "branch_id": DEFAULT_BRANCH_ID},
+                ),
+            )
+            if (
+                len(unique_document_records) >= target_count
+                or len(unique_document_records) >= top_k
+            ):
                 break
+
+    unique_documents = [
+        str(document["content"])
+        for document in _sort_memory_documents(unique_document_records)
+    ]
 
     logger.info(
         "[RAG Engine] Retrieved %s fragments. Top match score: %s",

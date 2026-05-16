@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
-import { Agent, Post, apiRequest } from "@/lib/api";
+import { Agent, GlobalSystemSettings, Post, apiRequest } from "@/lib/api";
 import { LoopSession, clearSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime, formatLocalDateTime, parseUtcTimestamp } from "@/lib/time";
 
@@ -32,6 +32,8 @@ export default function PlazaPage() {
   const [session, setSession] = useState<LoopSession | null>(null);
   const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
   const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
+  const [systemSettings, setSystemSettings] =
+    useState<GlobalSystemSettings | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
   const [activePostId, setActivePostId] = useState<number | null>(null);
   const [correctedText, setCorrectedText] = useState("");
@@ -55,6 +57,8 @@ export default function PlazaPage() {
     () => posts.find((post) => post.id === activePostId) ?? null,
     [activePostId, posts],
   );
+  const canSwitchBranches =
+    session?.is_admin === true || systemSettings?.allow_user_branch_switch === true;
 
   useEffect(() => {
     async function bootstrap() {
@@ -62,6 +66,31 @@ export default function PlazaPage() {
       if (!storedSession) {
         router.replace("/");
         return;
+      }
+      if (storedSession.is_admin) {
+        router.replace("/lab");
+        return;
+      }
+
+      let initialBranch = DEFAULT_BRANCH_ID;
+      try {
+        const settings = await apiRequest<GlobalSystemSettings>(
+          "/api/simulation/settings",
+        );
+        initialBranch = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+        setSystemSettings(settings);
+        setCurrentBranch(initialBranch);
+        setBranches((currentBranches) =>
+          Array.from(new Set([initialBranch, ...currentBranches])),
+        );
+        if (settings.allow_user_branch_switch) {
+          void loadBranches(initialBranch);
+        }
+      } catch {
+        setSystemSettings({
+          allow_user_branch_switch: false,
+          global_active_branch: DEFAULT_BRANCH_ID,
+        });
       }
 
       try {
@@ -74,15 +103,13 @@ export default function PlazaPage() {
         };
         saveSession(hydratedSession);
         setSession(hydratedSession);
-        void loadBranches();
         void loadProbeStatus();
       } catch {
         setSession(storedSession);
-        void loadBranches();
         void loadProbeStatus();
         setError(copy.noMatchingAgent);
       } finally {
-        await refreshFeed(DEFAULT_BRANCH_ID, false);
+        await refreshFeed(initialBranch, false);
       }
     }
 
@@ -98,13 +125,13 @@ export default function PlazaPage() {
     }
   }
 
-  async function loadBranches() {
+  async function loadBranches(preferredBranch = currentBranch) {
     setIsLoadingBranches(true);
     try {
       const result = await apiRequest<unknown>(BRANCHES_ENDPOINT);
       const branchList = normalizeBranches(result);
       setBranches(branchList);
-      if (!branchList.includes(currentBranch)) {
+      if (!branchList.includes(preferredBranch)) {
         setCurrentBranch(DEFAULT_BRANCH_ID);
       }
     } catch (err) {
@@ -356,33 +383,35 @@ export default function PlazaPage() {
               </button>
             </div>
           </div>
-          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p
-                className={`text-xs font-semibold uppercase tracking-wide ${
-                  currentBranch === DEFAULT_BRANCH_ID
-                    ? "text-gray-500"
-                    : "text-purple-600"
-                }`}
-              >
-                {copy.globalWorldLine}
-              </p>
-              <p className="mt-1 text-sm font-medium text-gray-700">
-                {copy.currentUniverse(currentBranch)}
-              </p>
+          {canSwitchBranches ? (
+            <div className="mt-4 flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p
+                  className={`text-xs font-semibold uppercase tracking-wide ${
+                    currentBranch === DEFAULT_BRANCH_ID
+                      ? "text-gray-500"
+                      : "text-purple-600"
+                  }`}
+                >
+                  {copy.globalWorldLine}
+                </p>
+                <p className="mt-1 text-sm font-medium text-gray-700">
+                  {copy.currentUniverse(currentBranch)}
+                </p>
+              </div>
+              <BranchSelector
+                branches={branches}
+                disabled={isLoading}
+                isLoading={isLoadingBranches}
+                label={t.common.branchSelector}
+                loadingLabel={t.common.loading}
+                onChange={updateCurrentBranch}
+                onRefresh={loadBranches}
+                refreshLabel={t.common.refreshBranches}
+                value={currentBranch}
+              />
             </div>
-            <BranchSelector
-              branches={branches}
-              disabled={isLoading}
-              isLoading={isLoadingBranches}
-              label={t.common.branchSelector}
-              loadingLabel={t.common.loading}
-              onChange={updateCurrentBranch}
-              onRefresh={loadBranches}
-              refreshLabel={t.common.refreshBranches}
-              value={currentBranch}
-            />
-          </div>
+          ) : null}
         </header>
 
         {message ? (

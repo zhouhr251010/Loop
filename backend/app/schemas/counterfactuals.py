@@ -6,6 +6,11 @@ from pydantic import BaseModel, Field
 class CounterfactualSubmitRequest(BaseModel):
     """One life-decision counterfactual anchor submitted by a user."""
 
+    agent_id: int | None = Field(default=None, ge=1)
+    branch_id: str = Field(
+        default="main",
+        description="The timeline/branch ID for this operation",
+    )
     decision_context: str = Field(..., min_length=1, max_length=2000)
     actual_choice: str | None = Field(default=None, max_length=2000)
     actual_result: str | None = Field(default=None, max_length=4000)

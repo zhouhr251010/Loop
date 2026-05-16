@@ -1,10 +1,13 @@
 """Database configuration for the Loop research platform."""
 
 from collections.abc import Generator
+import logging
 import os
 from pathlib import Path
+import re
 from urllib.parse import quote_plus
 
+import bcrypt
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
@@ -51,6 +54,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 DATABASE_INITIALIZE_LOCK_ID = 817504201
+logger = logging.getLogger(__name__)
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -201,6 +205,118 @@ def ensure_agent_npc_schema() -> None:
         )
 
 
+def ensure_probe_response_branch_schema() -> None:
+    """Keep existing probe response tables aligned with branch-aware collection."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE probe_responses
+                ADD COLUMN IF NOT EXISTS branch_id VARCHAR(128) NOT NULL DEFAULT 'main'
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_probe_responses_branch_id
+                ON probe_responses (branch_id)
+                """,
+            ),
+        )
+
+
+def ensure_user_admin_schema() -> None:
+    """Keep existing user tables aligned with the configured admin account."""
+    if not IS_POSTGRES:
+        return
+
+    admin_username = os.getenv("LOOP_ADMIN_USERNAME", "").strip()
+    admin_password = os.getenv("LOOP_ADMIN_PASSWORD", "")
+    if bool(admin_username) != bool(admin_password):
+        raise RuntimeError(
+            "Configure both LOOP_ADMIN_USERNAME and LOOP_ADMIN_PASSWORD, or neither.",
+        )
+    if admin_username:
+        if len(admin_username) < 3 or len(admin_username) > 64:
+            raise RuntimeError("LOOP_ADMIN_USERNAME must be 3-64 characters.")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", admin_username):
+            raise RuntimeError(
+                "LOOP_ADMIN_USERNAME may only contain letters, numbers, dots, "
+                "underscores, and hyphens.",
+            )
+        if len(admin_password) < 8:
+            raise RuntimeError("LOOP_ADMIN_PASSWORD must be at least 8 characters.")
+        if len(admin_password.encode("utf-8")) > 72:
+            raise RuntimeError("LOOP_ADMIN_PASSWORD must be 72 UTF-8 bytes or fewer.")
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_users_is_admin
+                ON users (is_admin)
+                """,
+            ),
+        )
+        if admin_username:
+            password_hash = bcrypt.hashpw(
+                admin_password.encode("utf-8"),
+                bcrypt.gensalt(),
+            ).decode("utf-8")
+            connection.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET is_admin = FALSE
+                    WHERE is_admin = TRUE
+                      AND lower(username) != lower(:admin_username)
+                    """,
+                ),
+                {"admin_username": admin_username},
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO users (username, password_hash, is_admin, created_at)
+                    VALUES (:admin_username, :password_hash, TRUE, CURRENT_TIMESTAMP(0))
+                    ON CONFLICT (username) DO UPDATE
+                    SET password_hash = EXCLUDED.password_hash,
+                        is_admin = TRUE
+                    """,
+                ),
+                {
+                    "admin_username": admin_username,
+                    "password_hash": password_hash,
+                },
+            )
+        else:
+            logger.warning(
+                "LOOP_ADMIN_USERNAME/LOOP_ADMIN_PASSWORD are not configured; "
+                "no bearer-login admin account will be available.",
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET is_admin = FALSE
+                    WHERE is_admin = TRUE
+                    """,
+                ),
+            )
+
+
 def initialize_database() -> None:
     """Initialize the configured database backend for application startup."""
     if IS_POSTGRES:
@@ -213,6 +329,8 @@ def initialize_database() -> None:
                 ensure_postgres_extensions()
                 Base.metadata.create_all(bind=engine)
                 ensure_agent_npc_schema()
+                ensure_probe_response_branch_schema()
+                ensure_user_admin_schema()
                 ensure_postgres_extensions()
                 ensure_postgres_rag_schema()
                 ensure_postgres_event_log_triggers()
@@ -226,6 +344,8 @@ def initialize_database() -> None:
     ensure_postgres_extensions()
     Base.metadata.create_all(bind=engine)
     ensure_agent_npc_schema()
+    ensure_probe_response_branch_schema()
+    ensure_user_admin_schema()
     ensure_postgres_extensions()
     ensure_postgres_rag_schema()
     ensure_postgres_event_log_triggers()

@@ -29,6 +29,10 @@ class ImportedChatMessageCreate(BaseModel):
 class ImportedChatBatchCreate(BaseModel):
     """Batch payload for target-agent perspective initialization."""
 
+    branch_id: str = Field(
+        default="main",
+        description="The timeline/branch ID for this operation",
+    )
     messages: list[ImportedChatMessageCreate] = Field(..., min_length=1, max_length=2000)
     topic: str | None = Field(default=None, max_length=80)
 

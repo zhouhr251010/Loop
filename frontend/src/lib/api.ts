@@ -6,6 +6,7 @@ export const API_BASE_URL =
 export type User = {
   id: number;
   username: string;
+  is_admin: boolean;
   mbti_type?: string | null;
   big_five_scores?: Record<string, number> | null;
   schwartz_values?: Record<string, number> | null;
@@ -36,6 +37,12 @@ export type PostOut = Omit<Post, "agent_name">;
 export type HealthResponse = {
   status: string;
   service: string;
+};
+
+export type GlobalSystemSettings = {
+  allow_user_branch_switch: boolean;
+  global_active_branch: string;
+  updated_at?: string | null;
 };
 
 export type ChatReply = {
@@ -81,6 +88,7 @@ export type ImportedChatMessage = {
 };
 
 export type ImportedChatBatch = {
+  branch_id?: string;
   messages: ImportedChatMessage[];
   topic?: string | null;
 };

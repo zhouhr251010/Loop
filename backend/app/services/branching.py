@@ -26,6 +26,14 @@ def normalize_branch_id(branch_id: str | None) -> str:
     return (branch_id or "").strip() or DEFAULT_BRANCH_ID
 
 
+def branch_scope_ids(branch_id: str | None) -> list[str]:
+    """Return the Git-style readable branch scope for one context."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    if normalized_branch_id == DEFAULT_BRANCH_ID:
+        return [DEFAULT_BRANCH_ID]
+    return [DEFAULT_BRANCH_ID, normalized_branch_id]
+
+
 def coerce_timestamp(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         timestamp = value

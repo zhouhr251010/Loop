@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.database import get_db
-from app.security import require_admin_key
+from app.security import require_admin_or_machine_key
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
@@ -98,7 +98,7 @@ def _restore_event_log_delete_trigger(db: Session) -> None:
 def purge_branch(
     purge_in: BranchPurgeRequest,
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin_or_machine: object = Depends(require_admin_or_machine_key),
 ) -> BranchPurgeResponse:
     """Hard-delete runtime records for one non-main branch."""
     branch_id = normalize_branch_id(purge_in.branch_id)

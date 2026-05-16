@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
 import {
   Agent,
@@ -64,7 +65,6 @@ export function TimeMachinePanel() {
   const { t } = useLanguage();
   const copy = t.timeMachine;
   const [session, setSession] = useState<LoopSession | null>(null);
-  const [adminKey, setAdminKey] = useState("");
   const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
   const [targetAgentId, setTargetAgentId] = useState<number | null>(null);
   const [targetAgentLabel, setTargetAgentLabel] = useState("");
@@ -107,6 +107,10 @@ export function TimeMachinePanel() {
       const storedSession = loadSession();
       if (!storedSession) {
         router.replace("/");
+        return;
+      }
+      if (!storedSession.is_admin) {
+        router.replace("/plaza");
         return;
       }
 
@@ -155,17 +159,9 @@ export function TimeMachinePanel() {
     loadBranches(targetAgentId);
   }, [targetAgentId]);
 
-  function adminHeaders() {
-    return adminKey.trim()
-      ? {
-          "X-Loop-Admin-Key": adminKey.trim(),
-        }
-      : undefined;
-  }
-
   async function loadAgentChoices() {
-    if (!adminKey.trim()) {
-      setError(copy.adminRequired);
+    if (!session?.is_admin) {
+      setError(copy.adminOnly);
       return;
     }
 
@@ -175,9 +171,6 @@ export function TimeMachinePanel() {
     try {
       const choices = await apiRequest<AgentSessionChoice[]>(
         "/api/users/agent-choices",
-        {
-          headers: adminHeaders(),
-        },
       );
       setAgentChoices(choices);
       setMessage(copy.loadedTargets(choices.length));
@@ -192,9 +185,7 @@ export function TimeMachinePanel() {
     setIsLoadingBranches(true);
     try {
       const branchList = normalizeBranches(
-        await apiRequest<unknown>(BRANCHES_ENDPOINT(agentId), {
-          headers: adminHeaders(),
-        }),
+        await apiRequest<unknown>(BRANCHES_ENDPOINT(agentId)),
       );
       setBranches(branchList);
       if (!branchList.includes(selectedBranch)) {
@@ -225,9 +216,6 @@ export function TimeMachinePanel() {
     try {
       const history = await apiRequest<EventLog[]>(
         EVENT_HISTORY_PAGE_ENDPOINT(targetAgentId, selectedBranch),
-        {
-          headers: adminHeaders(),
-        },
       );
       setEvents(history);
       setEventSkip(history.length);
@@ -260,9 +248,6 @@ export function TimeMachinePanel() {
     try {
       const history = await apiRequest<EventLog[]>(
         EVENT_HISTORY_PAGE_ENDPOINT(targetAgentId, selectedBranch, eventSkip),
-        {
-          headers: adminHeaders(),
-        },
       );
       setEvents((currentEvents) => {
         const existingIds = new Set(
@@ -377,7 +362,6 @@ export function TimeMachinePanel() {
         "/api/simulation/fork",
         {
           method: "POST",
-          headers: adminHeaders(),
           body: JSON.stringify({
             agent_id: targetAgentId,
             source_branch_id: selectedBranch,
@@ -451,67 +435,62 @@ export function TimeMachinePanel() {
         ) : null}
 
         <section className="mb-5 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(220px,300px)_minmax(180px,240px)_auto_auto]">
-            <label className="block">
-              <span className="text-sm font-medium text-gray-700">
-                {t.common.adminApiKey}
-              </span>
-              <input
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
-                onChange={(event) => setAdminKey(event.target.value)}
-                placeholder={copy.adminPlaceholder}
-                type="password"
-                value={adminKey}
-              />
-            </label>
-            <label className="block">
-              <span className="text-sm font-medium text-gray-700">
-                {copy.timelineTarget}
-              </span>
-              <select
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
-                onChange={(event) => chooseAgent(event.target.value)}
-                value={targetAgentId ?? ""}
-              >
-                {targetAgentId ? (
-                  <option value={targetAgentId}>{targetAgentLabel}</option>
-                ) : (
-                  <option value="">{t.common.chooseAgent}</option>
-                )}
-                {agentChoices.map((choice) => (
-                  <option key={choice.agent.id} value={choice.agent.id}>
-                    {formatAgentChoiceLabel(choice)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-sm font-medium text-gray-700">
-                {t.common.branchSelector}
-              </span>
-              <select
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
-                disabled={!targetAgentId || isLoadingBranches}
-                onChange={(event) => chooseBranch(event.target.value)}
-                value={selectedBranch}
-              >
-                {branches.map((branchId) => (
-                  <option key={branchId} value={branchId}>
-                    {branchId}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="flex items-end">
-              <button
-                className="w-full rounded-full border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 lg:w-auto"
-                disabled={!adminKey.trim() || isLoadingAgents}
-                onClick={loadAgentChoices}
-                type="button"
-              >
-                {isLoadingAgents ? t.common.loading : copy.loadAgents}
-              </button>
-            </div>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(180px,240px)_auto_auto]">
+            {session.is_admin ? (
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">
+                  {copy.timelineTarget}
+                </span>
+                <select
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-cyan-500 focus:bg-white focus:ring-4 focus:ring-cyan-100"
+                  onChange={(event) => chooseAgent(event.target.value)}
+                  value={targetAgentId ?? ""}
+                >
+                  {targetAgentId ? (
+                    <option value={targetAgentId}>{targetAgentLabel}</option>
+                  ) : (
+                    <option value="">{t.common.chooseAgent}</option>
+                  )}
+                  {agentChoices.map((choice) => (
+                    <option key={choice.agent.id} value={choice.agent.id}>
+                      {formatAgentChoiceLabel(choice)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  {copy.timelineTarget}
+                </p>
+                <p className="mt-1 truncate text-sm font-medium text-gray-800">
+                  {targetAgentLabel || t.common.noAgentYet}
+                </p>
+              </div>
+            )}
+            <BranchSelector
+              branches={branches}
+              disabled={!targetAgentId}
+              isLoading={isLoadingBranches}
+              label={t.common.branchSelector}
+              loadingLabel={t.common.loading}
+              onChange={chooseBranch}
+              onRefresh={() => targetAgentId && loadBranches(targetAgentId)}
+              refreshLabel={t.common.refreshBranches}
+              value={selectedBranch}
+            />
+            {session.is_admin ? (
+              <div className="flex items-end">
+                <button
+                  className="w-full rounded-full border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 lg:w-auto"
+                  disabled={isLoadingAgents}
+                  onClick={loadAgentChoices}
+                  type="button"
+                >
+                  {isLoadingAgents ? t.common.loading : copy.loadAgents}
+                </button>
+              </div>
+            ) : null}
             <div className="flex items-end">
               <button
                 className="w-full rounded-full bg-gray-950 px-4 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60 lg:w-auto"
@@ -529,7 +508,13 @@ export function TimeMachinePanel() {
           <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <h2 className="text-lg font-semibold text-gray-950">
+                <h2
+                  className={`text-lg font-semibold ${
+                    selectedBranch === "main"
+                      ? "text-indigo-950"
+                      : "text-fuchsia-950"
+                  }`}
+                >
                   {copy.selectedBranchLog(selectedBranch)}
                 </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-500">

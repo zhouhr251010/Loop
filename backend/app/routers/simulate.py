@@ -10,7 +10,7 @@ from app.crud import post as post_crud
 from app.database import get_db
 from app.models import Agent, utc_now_seconds
 from app.schemas.post import PostCreate, PostOut
-from app.security import require_admin_key
+from app.security import require_admin_or_machine_key
 from app.services.branching import branch_exists, normalize_branch_id
 from app.services.llm_service import LLMPostGenerationError, generate_agent_post
 from app.services.time_machine import TimeMachine
@@ -80,7 +80,7 @@ async def simulate_single_agent_post(
     agent_id: int,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin_or_machine: object = Depends(require_admin_or_machine_key),
 ) -> PostOut:
     """Generate a post for one agent from its owner's identity-core data."""
     db_agent = agent_crud.get_agent(db, agent_id)
@@ -102,7 +102,7 @@ async def simulate_user_agent_post(
     username: str,
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin_or_machine: object = Depends(require_admin_or_machine_key),
 ) -> PostOut:
     """Generate a post for the Agent owned by a username."""
     db_agent = agent_crud.get_agent_by_username(db, username.strip())
@@ -123,7 +123,7 @@ async def simulate_user_agent_post(
 async def simulate_tick(
     branch_id: str = "main",
     db: Session = Depends(get_db),
-    _admin_key: None = Depends(require_admin_key),
+    _admin_or_machine: object = Depends(require_admin_or_machine_key),
 ) -> list[PostOut]:
     """Advance the simulation clock by asking every agent to publish one post."""
     agents = agent_crud.get_agents(db, include_npc=False)

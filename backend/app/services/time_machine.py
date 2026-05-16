@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
+    branch_scope_ids,
     get_branch_anchor,
     normalize_branch_id,
 )
@@ -85,47 +86,30 @@ class TimeMachine:
             normalized_branch = DEFAULT_BRANCH_ID
         visited_branches.add(normalized_branch)
 
-        anchor = get_branch_anchor(self.db, normalized_branch)
-        if anchor is not None and target_timestamp < anchor.fork_timestamp:
-            return self.reconstruct_state(
-                agent_id=agent_id,
-                target_timestamp=target_timestamp,
-                branch_id=anchor.parent_branch_id,
-                _visited_branches=visited_branches,
-            )
-
         state = self._initial_state(agent_id, target_timestamp, normalized_branch)
-        parent_replayed_events = 0
-        branch_start_timestamp: datetime | None = None
-        if anchor is not None:
-            parent_state = self.reconstruct_state(
-                agent_id=agent_id,
-                target_timestamp=anchor.fork_timestamp,
-                branch_id=anchor.parent_branch_id,
-                _visited_branches=visited_branches,
-            )
-            self._load_base_state_from_reconstruction(state, parent_state)
-            parent_replayed_events = int(parent_state.get("replayed_events") or 0)
-            branch_start_timestamp = anchor.fork_timestamp
-
+        readable_branches = branch_scope_ids(normalized_branch)
         filters = [
             models.EventLog.agent_id == agent_id,
-            models.EventLog.branch_id == normalized_branch,
+            models.EventLog.branch_id.in_(readable_branches),
             models.EventLog.timestamp <= target_timestamp,
         ]
-        if branch_start_timestamp is not None:
-            filters.append(models.EventLog.timestamp >= branch_start_timestamp)
         events = (
             self.db.query(models.EventLog)
             .filter(*filters)
-            .order_by(models.EventLog.timestamp.asc(), models.EventLog.event_id.asc())
+            .order_by(
+                models.EventLog.timestamp.asc(),
+                models.EventLog.branch_id.asc(),
+                models.EventLog.event_id.asc(),
+            )
             .all()
         )
+        if normalized_branch != DEFAULT_BRANCH_ID:
+            events = sorted(events, key=self._event_replay_sort_key)
         for event in events:
             self._apply_event(state, event)
 
         count = len(events)
-        state["replayed_events"] = parent_replayed_events + count
+        state["replayed_events"] = count
         state["current_core_memory"] = self._format_current_core_memory(state)
         logger.info(
             f"[Time Machine] Reconstructing state for Agent {agent_id} at "
@@ -156,6 +140,10 @@ class TimeMachine:
         )
         latest_event_id = int(latest_event[0]) if latest_event else 0
         return (agent_id, branch_id, latest_event_id)
+
+    def _event_replay_sort_key(self, event: models.EventLog) -> tuple[datetime, int, int]:
+        branch_rank = 0 if normalize_branch_id(event.branch_id) == DEFAULT_BRANCH_ID else 1
+        return (event.timestamp, branch_rank, int(event.event_id or 0))
 
     def _coerce_timestamp(self, value: datetime) -> datetime:
         if value.tzinfo is not None:

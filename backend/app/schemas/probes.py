@@ -14,6 +14,17 @@ class ProbeSubmitRequest(BaseModel):
     answer: dict[str, Any]
 
 
+class ProbeSubmitBatchRequest(BaseModel):
+    """Batch of probe responses for one target Agent and branch."""
+
+    agent_id: int | None = Field(default=None, ge=1)
+    branch_id: str = Field(
+        default="main",
+        description="The timeline/branch ID for this operation",
+    )
+    responses: list[ProbeSubmitRequest] = Field(..., min_length=1, max_length=300)
+
+
 class ProbeSubmitResponse(BaseModel):
     """Summary returned after storing probe responses."""
 

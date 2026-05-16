@@ -1,11 +1,9 @@
 """Event-sourced simulation timeline endpoints."""
 
-import hmac
 import logging
-import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models
@@ -17,7 +15,8 @@ from app.schemas.event import (
     SimulationForkCreate,
     SimulationForkOut,
 )
-from app.security import get_current_user
+from app.schemas.system_settings import SystemSettingsOut, SystemSettingsPatch
+from app.security import get_current_user, require_admin
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
@@ -40,25 +39,62 @@ def _counterfactual_event_type(counterfactual_event: dict[str, Any]) -> str:
     return "COUNTERFACTUAL_EVENT"
 
 
-def _is_valid_admin_key(x_loop_admin_key: str | None) -> bool:
-    configured_key = os.getenv("LOOP_ADMIN_API_KEY")
-    return bool(
-        configured_key
-        and x_loop_admin_key
-        and hmac.compare_digest(x_loop_admin_key, configured_key)
+def _get_or_create_system_settings(db: Session) -> models.SystemSetting:
+    settings = db.get(models.SystemSetting, 1)
+    if settings is not None:
+        return settings
+
+    settings = models.SystemSetting(
+        id=1,
+        allow_user_branch_switch=False,
+        global_active_branch=DEFAULT_BRANCH_ID,
     )
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+    return settings
 
 
-def _get_optional_current_user(
-    authorization: str | None = Header(default=None),
+@router.get(
+    "/api/simulation/settings",
+    response_model=SystemSettingsOut,
+)
+def get_simulation_settings(
     db: Session = Depends(get_db),
-) -> models.User | None:
-    if not authorization:
-        return None
-    try:
-        return get_current_user(authorization=authorization, db=db)
-    except HTTPException:
-        return None
+) -> models.SystemSetting:
+    """Return public global experiment exposure settings."""
+    return _get_or_create_system_settings(db)
+
+
+@router.patch(
+    "/api/simulation/settings",
+    response_model=SystemSettingsOut,
+)
+def update_simulation_settings(
+    settings_in: SystemSettingsPatch,
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+) -> models.SystemSetting:
+    """Update global experiment exposure settings."""
+    settings = _get_or_create_system_settings(db)
+
+    if settings_in.global_active_branch is not None:
+        branch_id = normalize_branch_id(settings_in.global_active_branch)
+        if not branch_exists(db, branch_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Global active branch not found.",
+            )
+        settings.global_active_branch = branch_id
+
+    if settings_in.allow_user_branch_switch is not None:
+        settings.allow_user_branch_switch = settings_in.allow_user_branch_switch
+
+    settings.updated_at = models.utc_now_seconds()
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+    return settings
 
 
 def _validate_source_event(
@@ -112,6 +148,7 @@ def get_agent_events(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ) -> list[models.EventLog]:
     """Return a bounded slice of one agent's immutable event timeline."""
     db_agent = agent_crud.get_agent(db, agent_id)
@@ -119,6 +156,11 @@ def get_agent_events(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found.",
+        )
+    if not current_user.is_admin and db_agent.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only inspect your own agent events.",
         )
 
     normalized_branch_id = normalize_branch_id(branch_id)
@@ -143,8 +185,7 @@ def get_agent_events(
 def get_agent_branches(
     agent_id: int,
     db: Session = Depends(get_db),
-    x_loop_admin_key: str | None = Header(default=None),
-    current_user: models.User | None = Depends(_get_optional_current_user),
+    current_user: models.User = Depends(get_current_user),
 ) -> list[str]:
     """Return all global world-line branch ids after agent access is verified."""
     db_agent = agent_crud.get_agent(db, agent_id)
@@ -154,14 +195,12 @@ def get_agent_branches(
             detail="Agent not found.",
         )
 
-    is_admin = _is_valid_admin_key(x_loop_admin_key)
-    is_owner = current_user is not None and db_agent.user_id == current_user.id
-    if not is_admin and not is_owner:
+    is_owner = db_agent.user_id == current_user.id
+    if not current_user.is_admin and not is_owner:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "You can only list branches for your own agent, or provide a "
-                "valid X-Loop-Admin-Key."
+                "You can only list branches for your own agent."
             ),
         )
 
@@ -174,14 +213,9 @@ def get_agent_branches(
 )
 def get_global_branches(
     db: Session = Depends(get_db),
-    current_user: models.User | None = Depends(_get_optional_current_user),
+    current_user: models.User = Depends(get_current_user),
 ) -> list[str]:
     """Return all global world-line branch ids visible to signed-in users."""
-    if current_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
     return get_global_branch_ids(db)
 
 
@@ -193,8 +227,7 @@ def get_global_branches(
 def fork_simulation_timeline(
     fork_in: SimulationForkCreate,
     db: Session = Depends(get_db),
-    x_loop_admin_key: str | None = Header(default=None),
-    current_user: models.User | None = Depends(_get_optional_current_user),
+    current_user: models.User = Depends(get_current_user),
 ) -> SimulationForkOut:
     """Fork an agent timeline and inject one counterfactual event."""
     db_agent = agent_crud.get_agent(db, fork_in.agent_id)
@@ -204,14 +237,12 @@ def fork_simulation_timeline(
             detail="Agent not found.",
         )
 
-    is_admin = _is_valid_admin_key(x_loop_admin_key)
-    is_owner = current_user is not None and db_agent.user_id == current_user.id
-    if not is_admin and not is_owner:
+    is_owner = db_agent.user_id == current_user.id
+    if not current_user.is_admin and not is_owner:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "You can only fork your own agent timeline, or provide a valid "
-                "X-Loop-Admin-Key."
+                "You can only fork your own agent timeline."
             ),
         )
 

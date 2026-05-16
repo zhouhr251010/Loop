@@ -2,8 +2,15 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
-import { User, apiRequest } from "@/lib/api";
+import {
+  AgentSessionChoice,
+  GlobalSystemSettings,
+  User,
+  apiRequest,
+  formatAgentChoiceLabel,
+} from "@/lib/api";
 import { clearSession, loadSession } from "@/lib/session";
 
 type CounterfactualSubmitResponse = {
@@ -24,17 +31,26 @@ const EMPTY_FORM = {
   counterfactual_action: "",
   counterfactual_result: "",
 };
+const DEFAULT_BRANCH_ID = "main";
 
 export default function CounterfactualsPage() {
   const router = useRouter();
   const { t } = useLanguage();
   const copy = t.counterfactuals;
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [agentChoices, setAgentChoices] = useState<AgentSessionChoice[]>([]);
+  const [targetAgentId, setTargetAgentId] = useState<number | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [suggestions, setSuggestions] = useState<CounterfactualSuggestion[]>([]);
+  const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
+  const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
+  const [systemSettings, setSystemSettings] =
+    useState<GlobalSystemSettings | null>(null);
   const [error, setError] = useState("");
   const [suggestionError, setSuggestionError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingBranches, setIsLoadingBranches] = useState(false);
+  const [isLoadingAgents, setIsLoadingAgents] = useState(false);
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -42,6 +58,9 @@ export default function CounterfactualsPage() {
     form.decision_context.trim() &&
     form.counterfactual_action.trim() &&
     form.counterfactual_result.trim();
+  const canSwitchBranches =
+    currentUser?.is_admin === true ||
+    systemSettings?.allow_user_branch_switch === true;
 
   useEffect(() => {
     async function bootstrap() {
@@ -54,7 +73,32 @@ export default function CounterfactualsPage() {
       try {
         const user = await apiRequest<User>("/api/users/me");
         setCurrentUser(user);
-        void loadSuggestions();
+        if (user.is_admin) {
+          void loadBranches();
+          void loadAgentChoices(DEFAULT_BRANCH_ID);
+        } else {
+          let initialBranch = DEFAULT_BRANCH_ID;
+          try {
+            const settings = await apiRequest<GlobalSystemSettings>(
+              "/api/simulation/settings",
+            );
+            initialBranch = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+            setSystemSettings(settings);
+            setCurrentBranch(initialBranch);
+            setBranches((currentBranches) =>
+              Array.from(new Set([initialBranch, ...currentBranches])),
+            );
+            if (settings.allow_user_branch_switch) {
+              void loadBranches(initialBranch);
+            }
+          } catch {
+            setSystemSettings({
+              allow_user_branch_switch: false,
+              global_active_branch: DEFAULT_BRANCH_ID,
+            });
+          }
+          void loadSuggestions(initialBranch);
+        }
       } catch (err) {
         clearSession();
         setError(err instanceof Error ? err.message : copy.sessionExpired);
@@ -67,12 +111,68 @@ export default function CounterfactualsPage() {
     bootstrap();
   }, [router]);
 
-  async function loadSuggestions() {
+  async function loadBranches(preferredBranch = currentBranch) {
+    setIsLoadingBranches(true);
+    try {
+      const result = await apiRequest<unknown>("/api/simulation/branches");
+      const nextBranches = normalizeBranches(result);
+      setBranches(nextBranches);
+      setCurrentBranch((branchId) =>
+        nextBranches.includes(branchId)
+          ? branchId
+          : nextBranches.includes(preferredBranch)
+            ? preferredBranch
+            : DEFAULT_BRANCH_ID,
+      );
+    } catch {
+      setBranches([DEFAULT_BRANCH_ID]);
+      setCurrentBranch(DEFAULT_BRANCH_ID);
+    } finally {
+      setIsLoadingBranches(false);
+    }
+  }
+
+  async function loadAgentChoices(branchId = currentBranch) {
+    setIsLoadingAgents(true);
+    try {
+      const choices = await apiRequest<AgentSessionChoice[]>("/api/users/agent-choices");
+      setAgentChoices(choices);
+      const nextAgentId = choices[0]?.agent.id ?? null;
+      setTargetAgentId((currentTargetAgentId) => {
+        if (
+          currentTargetAgentId &&
+          choices.some((choice) => choice.agent.id === currentTargetAgentId)
+        ) {
+          void loadSuggestions(branchId, currentTargetAgentId);
+          return currentTargetAgentId;
+        }
+        if (nextAgentId) {
+          void loadSuggestions(branchId, nextAgentId);
+        }
+        return nextAgentId;
+      });
+    } catch (err) {
+      setSuggestionError(err instanceof Error ? err.message : copy.loadAgentsFailed);
+    } finally {
+      setIsLoadingAgents(false);
+    }
+  }
+
+  async function loadSuggestions(
+    branchId = currentBranch,
+    agentId = currentUser?.is_admin ? targetAgentId : null,
+  ) {
     setSuggestionError("");
     setIsLoadingSuggestions(true);
     try {
+      const query = new URLSearchParams();
+      query.set("branch_id", branchId);
+      if (agentId) {
+        query.set("agent_id", String(agentId));
+      }
+      const queryString = query.toString();
       const result = await apiRequest<CounterfactualSuggestion[]>(
-        "/api/counterfactuals/suggestions",
+        `/api/counterfactuals/suggestions${queryString ? `?${queryString}` : ""}`,
       );
       setSuggestions(result);
     } catch (err) {
@@ -104,9 +204,26 @@ export default function CounterfactualsPage() {
     });
   }
 
+  function selectBranch(branchId: string) {
+    setCurrentBranch(branchId);
+    void loadSuggestions(branchId);
+  }
+
+  function selectTargetAgent(agentId: string) {
+    const nextAgentId = Number(agentId) || null;
+    setTargetAgentId(nextAgentId);
+    if (nextAgentId) {
+      void loadSuggestions(currentBranch, nextAgentId);
+    }
+  }
+
   async function submitCounterfactual(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isComplete || isSubmitting) {
+    if (
+      !isComplete ||
+      isSubmitting ||
+      (currentUser?.is_admin && !targetAgentId)
+    ) {
       return;
     }
 
@@ -119,6 +236,8 @@ export default function CounterfactualsPage() {
         {
           method: "POST",
           body: JSON.stringify({
+            branch_id: currentBranch,
+            agent_id: currentUser?.is_admin ? targetAgentId : undefined,
             decision_context: form.decision_context.trim(),
             actual_choice: form.actual_choice.trim() || null,
             actual_result: form.actual_result.trim() || null,
@@ -176,7 +295,7 @@ export default function CounterfactualsPage() {
             <button
               className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
               disabled={isLoadingSuggestions}
-              onClick={loadSuggestions}
+              onClick={() => loadSuggestions()}
               type="button"
             >
               {isLoadingSuggestions ? copy.suggestionsLoading : copy.refreshSuggestions}
@@ -230,6 +349,43 @@ export default function CounterfactualsPage() {
           className="space-y-5 rounded-2xl bg-white p-6 shadow-sm"
           onSubmit={submitCounterfactual}
         >
+          {canSwitchBranches ? (
+            <BranchSelector
+              branches={branches}
+              disabled={isSubmitting}
+              isLoading={isLoadingBranches}
+              label={t.common.branchSelector}
+              loadingLabel={t.common.refreshing}
+              onChange={selectBranch}
+              onRefresh={loadBranches}
+              refreshLabel={t.common.refreshBranches}
+              value={currentBranch}
+            />
+          ) : null}
+
+          {currentUser?.is_admin ? (
+            <label className="block">
+              <span className="text-sm font-semibold text-slate-800">
+                {copy.agentPicker}
+              </span>
+              <select
+                className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-500"
+                disabled={isSubmitting || isLoadingAgents}
+                onChange={(event) => selectTargetAgent(event.target.value)}
+                value={targetAgentId ?? ""}
+              >
+                {agentChoices.length === 0 ? (
+                  <option value="">{t.common.chooseAgent}</option>
+                ) : null}
+                {agentChoices.map((choice) => (
+                  <option key={choice.agent.id} value={choice.agent.id}>
+                    {formatAgentChoiceLabel(choice)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+
           <label className="block">
             <span className="text-sm font-semibold text-slate-800">
               {copy.decisionLabel}
@@ -311,12 +467,54 @@ export default function CounterfactualsPage() {
           <button
             className="w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-slate-400"
             type="submit"
-            disabled={!isComplete || isSubmitting}
+            disabled={
+              !isComplete ||
+              isSubmitting ||
+              (currentUser?.is_admin && !targetAgentId)
+            }
           >
             {isSubmitting ? copy.submitting : copy.submit}
           </button>
         </form>
       </div>
     </main>
+  );
+}
+
+function normalizeBranches(result: unknown) {
+  const rawBranches =
+    result && typeof result === "object"
+      ? "branch_ids" in result
+        ? (result as { branch_ids?: unknown }).branch_ids
+        : "branches" in result
+          ? (result as { branches?: unknown }).branches
+          : result
+      : result;
+
+  const branches = Array.isArray(rawBranches)
+    ? rawBranches
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object" && "branch_id" in item) {
+            return String((item as { branch_id: unknown }).branch_id);
+          }
+          return "";
+        })
+        .map((branchId) => branchId.trim())
+        .filter(Boolean)
+    : [];
+
+  return Array.from(new Set([DEFAULT_BRANCH_ID, ...branches])).sort(
+    (left, right) => {
+      if (left === DEFAULT_BRANCH_ID) {
+        return -1;
+      }
+      if (right === DEFAULT_BRANCH_ID) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    },
   );
 }

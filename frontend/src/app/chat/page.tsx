@@ -2,8 +2,15 @@
 
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BranchSelector } from "@/components/BranchSelector";
 import { useLanguage } from "@/components/LanguageContext";
-import { Agent, ChatReply, DriftCheckResponse, apiRequest } from "@/lib/api";
+import {
+  Agent,
+  ChatReply,
+  DriftCheckResponse,
+  GlobalSystemSettings,
+  apiRequest,
+} from "@/lib/api";
 import { LoopSession, loadSession, saveSession } from "@/lib/session";
 import { formatFeedTime } from "@/lib/time";
 
@@ -151,6 +158,8 @@ export default function ChatPage() {
   const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [branches, setBranches] = useState<string[]>([DEFAULT_BRANCH_ID]);
   const [currentBranch, setCurrentBranch] = useState(DEFAULT_BRANCH_ID);
+  const [systemSettings, setSystemSettings] =
+    useState<GlobalSystemSettings | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState("");
   const [historySkip, setHistorySkip] = useState(0);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -181,6 +190,8 @@ export default function ChatPage() {
   );
   const currentSessionLabel = getSessionDisplayLabel(currentSessionId);
   const visibleTimelineBranches = uniqueBranches([currentBranch, ...branches]);
+  const canSwitchBranches =
+    session?.is_admin === true || systemSettings?.allow_user_branch_switch === true;
   const mobilePanelCopy =
     language === "zh"
       ? {
@@ -190,6 +201,8 @@ export default function ChatPage() {
           settingsTitle: "聊天设置",
           diagnostics: "诊断",
           diagnosticsTitle: "心智诊断",
+          close: "关闭",
+          closePanel: "关闭面板",
         }
       : {
           sessions: "Chats",
@@ -198,6 +211,8 @@ export default function ChatPage() {
           settingsTitle: "Chat setup",
           diagnostics: "Insight",
           diagnosticsTitle: "Mind insight",
+          close: "Close",
+          closePanel: "Close panel",
         };
 
   useEffect(() => {
@@ -211,12 +226,38 @@ export default function ChatPage() {
         router.replace("/");
         return;
       }
+      if (storedSession.is_admin) {
+        router.replace("/lab");
+        return;
+      }
+
+      let initialBranch = DEFAULT_BRANCH_ID;
+      let allowInitialBranchSwitch = false;
+      try {
+        const settings = await apiRequest<GlobalSystemSettings>(
+          "/api/simulation/settings",
+        );
+        initialBranch = settings.global_active_branch?.trim() || DEFAULT_BRANCH_ID;
+        allowInitialBranchSwitch = settings.allow_user_branch_switch;
+        setSystemSettings(settings);
+      } catch {
+        setSystemSettings({
+          allow_user_branch_switch: false,
+          global_active_branch: DEFAULT_BRANCH_ID,
+        });
+      }
+      setCurrentBranch(initialBranch);
+      setBranches((currentBranches) =>
+        uniqueBranches([initialBranch, ...currentBranches]),
+      );
 
       if (storedSession.agent_id) {
         startNewConversation();
         setSession(storedSession);
-        loadBranches(storedSession.agent_id);
-        loadChatSessions(storedSession.agent_id, DEFAULT_BRANCH_ID);
+        loadChatSessions(storedSession.agent_id, initialBranch);
+        if (allowInitialBranchSwitch) {
+          loadBranches(storedSession.agent_id);
+        }
         return;
       }
 
@@ -231,8 +272,10 @@ export default function ChatPage() {
         saveSession(hydratedSession);
         startNewConversation();
         setSession(hydratedSession);
-        loadBranches(agent.id);
-        loadChatSessions(agent.id, DEFAULT_BRANCH_ID);
+        loadChatSessions(agent.id, initialBranch);
+        if (allowInitialBranchSwitch) {
+          loadBranches(agent.id);
+        }
       } catch {
         setSession(storedSession);
         setError(copy.noAgent);
@@ -828,44 +871,42 @@ export default function ChatPage() {
                     {copy.subtitle(session.agent_name ?? t.common.currentAgent)}
                   </p>
                   <p className="mt-1 truncate text-xs leading-5 text-gray-400 lg:mt-2">
-                    {copy.branchLabel}: {currentBranch}
-                    <span className="mx-2 text-gray-300">/</span>
+                    {canSwitchBranches ? (
+                      <>
+                        {copy.branchLabel}:{" "}
+                        <span
+                          className={`font-semibold ${
+                            currentBranch === DEFAULT_BRANCH_ID
+                              ? "text-indigo-700"
+                              : "text-fuchsia-700"
+                          }`}
+                        >
+                          {currentBranch}
+                        </span>
+                        <span className="mx-2 text-gray-300">/</span>
+                      </>
+                    ) : null}
                     {copy.currentConversation}: {currentSessionLabel}
                   </p>
                 </div>
 
-                <div className="hidden grid-cols-1 gap-3 sm:grid-cols-2 lg:grid xl:grid-cols-[minmax(12rem,1fr)_auto_minmax(12rem,1fr)_minmax(12rem,1fr)_auto] xl:items-end">
-                  <label className="block min-w-0">
-                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      {copy.currentTimeline}
-                    </span>
-                    <select
-                      className="mt-2 w-full rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                      disabled={isLoadingBranches || isSending}
-                      onChange={(event) =>
-                        updateCurrentBranch(event.target.value)
+                <div className="hidden grid-cols-1 gap-3 sm:grid-cols-2 lg:grid xl:grid-cols-[minmax(18rem,1.3fr)_minmax(12rem,1fr)_minmax(12rem,1fr)_auto] xl:items-end">
+                  {canSwitchBranches ? (
+                    <BranchSelector
+                      branches={visibleTimelineBranches}
+                      className="sm:col-span-2 xl:col-span-1"
+                      disabled={isSending || !session.agent_id}
+                      isLoading={isLoadingBranches}
+                      label={copy.currentTimeline}
+                      loadingLabel={t.common.loading}
+                      onChange={updateCurrentBranch}
+                      onRefresh={() =>
+                        session.agent_id && loadBranches(session.agent_id)
                       }
+                      refreshLabel={t.common.refreshBranches}
                       value={currentBranch}
-                    >
-                      {visibleTimelineBranches.map((branchId) => (
-                        <option key={branchId} value={branchId}>
-                          {branchId}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button
-                    className="self-end rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition hover:border-gray-300 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 sm:w-full xl:w-auto"
-                    disabled={!session.agent_id || isLoadingBranches}
-                    onClick={() =>
-                      session.agent_id && loadBranches(session.agent_id)
-                    }
-                    type="button"
-                  >
-                    {isLoadingBranches
-                      ? t.common.loading
-                      : t.common.refreshBranches}
-                  </button>
+                    />
+                  ) : null}
                   <label className="block min-w-0 sm:col-span-2 xl:col-span-1">
                     <span className="text-xs font-semibold uppercase tracking-wide text-gray-400">
                       {copy.experimentMode}
@@ -1071,13 +1112,14 @@ export default function ChatPage() {
           driftResult={latestDriftResult}
           experimentMode={experimentMode}
           isSending={isSending}
+          showBranchDetails={session.is_admin}
           snapshot={developerSnapshot}
         />
       ) : null}
       {mobilePanel ? (
         <div className="fixed inset-0 z-50 flex items-end bg-gray-950/40 lg:hidden">
           <button
-            aria-label="关闭面板"
+            aria-label={mobilePanelCopy.closePanel}
             className="absolute inset-0 cursor-default"
             onClick={() => setMobilePanel(null)}
             type="button"
@@ -1096,7 +1138,7 @@ export default function ChatPage() {
                 onClick={() => setMobilePanel(null)}
                 type="button"
               >
-                关闭
+                {mobilePanelCopy.close}
               </button>
             </div>
 
@@ -1161,31 +1203,19 @@ export default function ChatPage() {
 
             {mobilePanel === "settings" ? (
               <div className="max-h-[calc(78dvh-3.5rem)] space-y-4 overflow-y-auto p-4">
-                <label className="block">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    {copy.currentTimeline}
-                  </span>
-                  <select
-                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-3 text-sm font-medium text-gray-900 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
-                    disabled={isLoadingBranches || isSending}
-                    onChange={(event) => updateCurrentBranch(event.target.value)}
+                {canSwitchBranches ? (
+                  <BranchSelector
+                    branches={visibleTimelineBranches}
+                    disabled={isSending || !session.agent_id}
+                    isLoading={isLoadingBranches}
+                    label={copy.currentTimeline}
+                    loadingLabel={t.common.loading}
+                    onChange={updateCurrentBranch}
+                    onRefresh={() => session.agent_id && loadBranches(session.agent_id)}
+                    refreshLabel={t.common.refreshBranches}
                     value={currentBranch}
-                  >
-                    {visibleTimelineBranches.map((branchId) => (
-                      <option key={branchId} value={branchId}>
-                        {branchId}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold text-gray-700 shadow-sm disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!session.agent_id || isLoadingBranches}
-                  onClick={() => session.agent_id && loadBranches(session.agent_id)}
-                  type="button"
-                >
-                  {isLoadingBranches ? t.common.loading : t.common.refreshBranches}
-                </button>
+                  />
+                ) : null}
                 <label className="block">
                   <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                     {copy.experimentMode}
@@ -1253,6 +1283,7 @@ export default function ChatPage() {
                   driftResult={latestDriftResult}
                   experimentMode={experimentMode}
                   isSending={isSending}
+                  showBranchDetails={session.is_admin}
                   snapshot={developerSnapshot}
                 />
               </div>
@@ -1306,6 +1337,7 @@ function DeveloperPanel({
   driftResult,
   experimentMode,
   isSending,
+  showBranchDetails,
   snapshot,
 }: {
   currentBranch: string;
@@ -1314,6 +1346,7 @@ function DeveloperPanel({
   driftResult: DriftCheckResponse | null;
   experimentMode: ExperimentModeChoice;
   isSending: boolean;
+  showBranchDetails: boolean;
   snapshot: DeveloperSnapshot | null;
 }) {
   const { t } = useLanguage();
@@ -1334,7 +1367,21 @@ function DeveloperPanel({
         </p>
         <h2 className="mt-1 text-lg font-bold text-gray-950">{copy.title}</h2>
         <p className="mt-2 text-xs leading-5 text-gray-500">
-          {currentBranch} / {currentSessionLabel} /{" "}
+          {showBranchDetails ? (
+            <>
+              <span
+                className={`font-semibold ${
+                  currentBranch === DEFAULT_BRANCH_ID
+                    ? "text-indigo-700"
+                    : "text-fuchsia-700"
+                }`}
+              >
+                {currentBranch}
+              </span>{" "}
+              /{" "}
+            </>
+          ) : null}
+          {currentSessionLabel} /{" "}
           {(t.chat.topics as Record<string, string>)[currentTopic] ?? currentTopic}
         </p>
       </div>
@@ -1422,6 +1469,7 @@ function DeveloperPanelContent({
   driftResult,
   experimentMode,
   isSending,
+  showBranchDetails,
   snapshot,
 }: {
   currentBranch: string;
@@ -1430,6 +1478,7 @@ function DeveloperPanelContent({
   driftResult: DriftCheckResponse | null;
   experimentMode: ExperimentModeChoice;
   isSending: boolean;
+  showBranchDetails: boolean;
   snapshot: DeveloperSnapshot | null;
 }) {
   const { t } = useLanguage();
@@ -1450,7 +1499,21 @@ function DeveloperPanelContent({
         </p>
         <h2 className="mt-1 text-lg font-bold text-gray-950">{copy.title}</h2>
         <p className="mt-2 text-xs leading-5 text-gray-500">
-          {currentBranch} / {currentSessionLabel} /{" "}
+          {showBranchDetails ? (
+            <>
+              <span
+                className={`font-semibold ${
+                  currentBranch === DEFAULT_BRANCH_ID
+                    ? "text-indigo-700"
+                    : "text-fuchsia-700"
+                }`}
+              >
+                {currentBranch}
+              </span>{" "}
+              /{" "}
+            </>
+          ) : null}
+          {currentSessionLabel} /{" "}
           {(t.chat.topics as Record<string, string>)[currentTopic] ?? currentTopic}
         </p>
       </div>

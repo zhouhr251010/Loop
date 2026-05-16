@@ -23,17 +23,19 @@ If you only remember the highest-signal things before touching this codebase, re
 
 - Loop is an event-sourced, branch-aware social simulation. `EventLog` is the timeline truth for branch views, while session-level chat history is stored and paginated from `ChatLog`.
 - Each `User` owns exactly one `Agent`; questionnaire submission creates or refreshes that one-to-one mapping.
+- A configured bearer-login admin account is supported through `LOOP_ADMIN_USERNAME` / `LOOP_ADMIN_PASSWORD`; admin sessions can inspect/switch Agent views and operate on protected research controls.
 - Durable identity currently lives in two places: free-form `autobiography` and structured `core_memory`.
 - `core_memory` is not just three loose fields anymore. The normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`.
 - The app now also maintains system-owned NPC agents. Startup seeds one default NPC, and the import flow can create stable NPC agents for external group-chat senders; do not confuse them with participant-owned Agents.
 - Chat is no longer "prompt + RAG only". `mode_alpha` uses the full IACL path with active memory/tools, while `mode_beta` is a static-prompt baseline for blind comparison.
-- M1-M6 validation data now also includes weekly probe responses and life-decision counterfactual anchors. Keep `/api/probes/*`, `/api/counterfactuals/*`, and `ProbeResponse` aligned with the research flow.
+- Global branch exposure is controlled by singleton `SystemSetting`: `global_active_branch` chooses the participant-facing branch, and `allow_user_branch_switch` decides whether non-admin users can switch branches in the UI.
+- M1-M6 validation data now also includes branch-aware weekly probe responses and life-decision counterfactual anchors. Keep `/api/probes/*`, `/api/counterfactuals/*`, `ProbeResponse.branch_id`, and optional admin `agent_id` targeting aligned with the research flow.
 - Chat turns are isolated by `branch_id`, `session_id`, and `topic`; do not accidentally merge independent conversations when loading history, routing context, or drift checks.
 - Branch behavior depends on `TimeMachine` reconstruction plus branch-specific `EventLog` replay. Do not fake branches by simply filtering `Post` rows.
 - User corrections do not rewrite `posts.content` in place. Branch feed projection overlays the newest `FEEDBACK_CREATED` correction when rendering.
 - Long lists are intentionally bounded on both sides. Plaza, chat history, and event history must stay paginated.
 - The frontend normally talks to Next.js on `localhost:3000`, and Next.js rewrites `/api/*` to FastAPI on `127.0.0.1:8001`. `/health` is the current exception.
-- RAG infrastructure is no longer a local vector-store directory. The current path is Postgres + pgvector for `rag_documents`, Infinity embedding/reranker services on `127.0.0.1:7997/7998`, and optional Redis-backed rate limiting.
+- RAG infrastructure is no longer a local vector-store directory. The current path is Postgres + pgvector for `rag_documents`, Infinity embedding/reranker services on `127.0.0.1:7997/7998`, Git-style branch memory reads (`main` only on main, `main + branch` on forks), and optional Redis-backed rate limiting.
 - Local runtime state matters: `.env`, `model_cache/`, and Docker volumes backing Postgres/Redis are part of the experiment environment and must not be committed or casually deleted.
 
 ## Repository Layout
@@ -46,6 +48,7 @@ If you only remember the highest-signal things before touching this codebase, re
       database.py
       models.py
       schemas/
+        system_settings.py
       crud/
       routers/
         admin.py
@@ -77,6 +80,7 @@ If you only remember the highest-signal things before touching this codebase, re
         npc_seed.py
         memory_watcher.py
         agent_cleanup_service.py
+        access_control.py
     requirements.txt
   frontend/
     next.config.mjs
@@ -143,6 +147,7 @@ Tech stack:
 - PostgreSQL + pgvector is required; startup fails fast when Postgres is not configured
 - bcrypt password hashing
 - compact signed bearer tokens implemented in `backend/app/security.py`
+- configured admin bearer login with `User.is_admin`, plus machine-to-machine `X-Loop-Admin-Key` support on selected automation endpoints
 - Redis-backed async fixed-window rate limiting when `LOOP_REDIS_URL` is configured, with fail-open behavior plus request-size limits, security headers, and trusted-host checks
 - OpenAI Python SDK pointed at DeepSeek-compatible API
 - python-dotenv
@@ -190,7 +195,8 @@ There is no local database-file fallback.
 
 Core SQLAlchemy tables:
 
-- `User`: username, password hash, MBTI, Big Five, Schwartz values
+- `SystemSetting`: singleton global controls for participant branch exposure (`allow_user_branch_switch`, `global_active_branch`)
+- `User`: username, password hash, admin flag, MBTI, Big Five, Schwartz values
 - `User.autobiography`: optional digital autobiography / core life memory used as Agent identity memory
 - `User.core_memory`: structured core memory used during chat/post generation; normalized keys are `persona_traits`, `key_relationships`, `current_goals`, and `communication_style`
 - `Agent`: one virtual agent per user, plus system-owned NPC agents flagged with `is_npc`
@@ -198,7 +204,7 @@ Core SQLAlchemy tables:
 - `FeedbackLog`: user corrections, including original text, corrected text, timestamp, and future vector-store linkage
 - `ChatLog`: private sync turns with user message, Agent reply, branch id, session id, topic, experiment mode, and second-precision timestamp
 - `Evaluation`: public blind-test authenticity rating with evaluator relation, 1-5 score, qualitative feedback, sampled chat log ids, and timestamp
-- `ProbeResponse`: authenticated M1-M6 validation probe answers, including weekly IPIP-120/PVQ-21 human baselines
+- `ProbeResponse`: authenticated M1-M6 validation probe answers by branch, including weekly IPIP-120/PVQ-21 human baselines
 - `EventLog`: append-only event store for reconstructing branch timelines
 - `Relationship`: directed social-affinity scores between Agents
 - `ReflectionEvent`: layered reflection nodes from sleep-style memory consolidation
@@ -209,9 +215,11 @@ Core SQLAlchemy tables:
 - `backend/app/services/llm_service.py` keeps both tool-calling chat and fallback retrieval paths. Its historical chat loader can page older branch/session-scoped chat turns on demand, so do not replace it with one unbounded "load all history" query.
 - `backend/app/services/agent_graph.py` binds `AGENT_TOOLS` into the graph and preserves short-term active messages, emotion, energy, topic state, and core-memory writeback. Treat this as the Agent runtime loop.
 - The chat page supports research experiment modes. `mode_alpha` is the full IACL condition; `mode_beta` calls `chat_with_agent_static_prompt()` with tools, RAG, self-updating memory, and prior history disabled.
-- `/api/probes/submit` stores IPIP/PVQ validation answers, scores them through `scoring_service.py`, merges the scored profile into `User.core_memory`, and refreshes the Agent profile when needed.
+- `/api/probes/submit` stores IPIP/PVQ validation answers, scores them through `scoring_service.py`, appends branch memory events, and only merges the scored profile into `User.core_memory` / refreshes the Agent profile on `main`.
 - `/api/counterfactuals/suggestions` mines autobiography plus bounded recent chats/posts to suggest candidate life-decision anchors before submission.
-- `/api/counterfactuals/submit` records life-decision counterfactual anchors, appends `COUNTERFACTUAL_ANCHOR_CREATED`, and writes the anchor into `persona_traits` via a `CORE_MEMORY_UPDATED` event.
+- `/api/counterfactuals/submit` records life-decision counterfactual anchors, appends `COUNTERFACTUAL_ANCHOR_CREATED`, and emits `CORE_MEMORY_UPDATED`; only `main` submissions persist the anchor directly into `User.core_memory.persona_traits`.
+- Probe and counterfactual endpoints accept optional `agent_id`. Non-admin users can only target their own Agent through `access_control.py`; admin bearer sessions can target another Agent for controlled research workflows.
+- `/api/simulation/settings` exposes global branch controls. Admins can patch `global_active_branch` and `allow_user_branch_switch`; participant pages use those values to decide the default branch and whether the selector is available.
 - Zero-shot identity drift detection is part of the M1/M2 validation loop. `/api/chat/{agent_id}/check-drift` judges recent session replies against the identity core and appends `DRIFT_DETECTED` only when the judge flags drift.
 - **Frontend pagination anti-blowup is also core architecture.** Plaza, Chat, and TimeMachine load bounded pages with `skip`/`limit`, `hasMore*` flags, and explicit "load more" flows. Keep `PLAZA_PAGE_SIZE`, `CHAT_HISTORY_PAGE_SIZE`, and `EVENT_PAGE_SIZE` style guards; do not regress these pages to fetching all posts, all chat logs, or all events at once.
 - Backend list endpoints must continue to enforce bounded `limit` values: `/api/plaza/events`, `/api/posts`, `/api/agents/{agent_id}/chat`, and `/api/agents/{agent_id}/events` are intentionally paginated to protect long-running experiments.
@@ -230,7 +238,7 @@ Primary runtime chain:
 
 ```text
 User/Agent action
-  -> FastAPI router validates bearer/admin key and branch_id
+  -> FastAPI router validates bearer/admin bearer/machine key and branch_id
   -> SQLAlchemy writes domain row when needed
   -> EventLog append-only event is recorded
   -> branch-aware readers replay or filter EventLog
@@ -273,24 +281,24 @@ GET  /health
 POST /api/users/register
 POST /api/users/login
 GET  /api/users/me
-GET  /api/users/agent-choices                       [admin key]
-POST /api/users/agent-choices/{agent_id}/session    [admin key]
-POST /api/users/npc-agents/from-senders             [admin key]
+GET  /api/users/agent-choices                       [admin bearer]
+POST /api/users/agent-choices/{agent_id}/session    [admin bearer]
+POST /api/users/npc-agents/from-senders             [admin bearer]
 POST /api/users/me/questionnaire
 POST /api/users/{user_id}/questionnaire
 GET  /api/users/me/agent
 GET  /api/users/{user_id}/agent
 
-DELETE /api/agents/{agent_id}                       [owner bearer or admin key, destructive]
+DELETE /api/agents/{agent_id}                       [owner/admin bearer, destructive]
 POST /api/agents/me/posts
 POST /api/agents/{agent_id}/posts
 GET  /api/posts
 GET  /api/plaza/events
 POST /api/posts/{post_id}/feedback
 
-POST /api/simulate/user/{username}/post             [admin key]
-POST /api/simulate/agent/{agent_id}/post            [admin key]
-POST /api/simulate/tick                             [admin key]
+POST /api/simulate/user/{username}/post             [admin bearer or machine key]
+POST /api/simulate/agent/{agent_id}/post            [admin bearer or machine key]
+POST /api/simulate/tick                             [admin bearer or machine key]
 
 POST /api/agents/me/chat
 GET  /api/agents/{agent_id}/chat
@@ -324,16 +332,18 @@ GET  /api/agents/me/feed-preview
 GET  /api/agents/{agent_id}/feed-preview
 
 GET  /api/agents/{agent_id}/events
+GET  /api/simulation/settings
+PATCH /api/simulation/settings                      [admin bearer]
 GET  /api/simulation/agents/{agent_id}/branches
 GET  /api/simulation/branches
 POST /api/simulation/fork
 
-POST /api/admin/purge-branch                         [admin key, destructive, non-main only]
+POST /api/admin/purge-branch                         [admin bearer or machine key, destructive, non-main only]
 
-GET  /api/export/{user_id}/chatlogs                 [admin key]
-GET  /api/export/by-username/{username}/chatlogs    [admin key]
-GET  /api/export/{user_id}/feedbacks                [admin key]
-GET  /api/export/by-username/{username}/feedbacks   [admin key]
+GET  /api/export/{user_id}/chatlogs                 [admin bearer]
+GET  /api/export/by-username/{username}/chatlogs    [admin bearer]
+GET  /api/export/{user_id}/feedbacks                [admin bearer]
+GET  /api/export/by-username/{username}/feedbacks   [admin bearer]
 ```
 
 Important backend conventions:
@@ -342,15 +352,16 @@ Important backend conventions:
 - Timestamps use second precision through `utc_now_seconds()`.
 - Password hashes are never returned by response schemas.
 - Most user/Agent data endpoints require a bearer token from register/login.
-- Research-control endpoints use `X-Loop-Admin-Key`, checked against `LOOP_ADMIN_API_KEY`.
+- Admin-only UI/research endpoints generally require an admin bearer session. `LOOP_ADMIN_USERNAME` / `LOOP_ADMIN_PASSWORD` seed exactly one admin user at startup; normal registration cannot claim that reserved username.
+- Machine automation endpoints use `X-Loop-Admin-Key`, checked against `LOOP_ADMIN_API_KEY`. `require_admin_or_machine_key` currently protects simulation and branch purge endpoints.
 - If `LOOP_AUTH_SECRET` is unset, bearer tokens fall back to a per-process secret and all sessions become invalid after backend restart.
 - Feedback creation validates that users can only correct posts generated by their own Agent.
-- CORS defaults to `http://localhost:3000` and `http://127.0.0.1:3000`, and can be configured with comma-separated `BACKEND_CORS_ORIGINS` in the root `.env`.
+- CORS defaults to `http://localhost:3000` and `http://127.0.0.1:3000`, and can be configured with comma-separated `BACKEND_CORS_ORIGINS` in the root `.env`. The current middleware allow-list includes `GET`, `POST`, `DELETE`, and `OPTIONS`; direct browser calls to the `PATCH /api/simulation/settings` endpoint may need CORS method support if not using the Next.js same-origin proxy.
 - `backend/app/database.py` requires Postgres through `POSTGRES_URL` or `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`; missing configuration raises `RuntimeError` during startup.
-- `Base.metadata.create_all()` creates new tables. Startup also ensures the `agents.is_npc` schema, enables the `vector` extension, creates the pgvector-backed `rag_documents` table and indexes, and installs Postgres append-only triggers for `event_logs`.
+- `Base.metadata.create_all()` creates new tables. Startup also ensures `agents.is_npc`, `probe_responses.branch_id`, `users.is_admin`, the configured admin user, the `vector` extension, the pgvector-backed `rag_documents` table and indexes, and Postgres append-only triggers for `event_logs`.
 - On Postgres, startup also enables the `vector` extension and creates the pgvector-backed `rag_documents` table plus metadata/embedding indexes.
 - FastAPI lifespan initialization runs `initialize_database()`, `ensure_system_npc_agent()`, and then optional RAG warmup in that order.
-- `EventLog` is the timeline source of truth for branch-aware plaza and time-machine reconstruction. Session-level chat history currently reads bounded `ChatLog` pages filtered by `branch_id` and `session_id`.
+- `EventLog` is the timeline source of truth for branch-aware plaza and time-machine reconstruction. Session-level chat history currently reads bounded `ChatLog` pages filtered by `branch_id`, `session_id`, and topic when relevant.
 - Questionnaire and probe scoring live in `backend/app/services/scoring_service.py`; raw IPIP/PVQ item payloads are converted into scored Big Five/Schwartz summaries before being merged into core memory.
 - `warm_up_rag_models()` runs during FastAPI lifespan unless `LOOP_RAG_PRELOAD=false`; it warms the external Infinity embedding/reranker endpoints with a lock + TTL guard so multiple workers do not stampede the same model load.
 - `/api/admin/purge-branch` removes runtime records for one non-main branch, temporarily drops and restores the `event_logs_no_delete` Postgres trigger, and should be treated as a destructive research-maintenance operation.
@@ -361,8 +372,10 @@ Important backend conventions:
 These are current implementation facts that are easy to miss when skimming the repo:
 
 - `core_memory_service.py` normalizes `User.core_memory` to four fields, not three. Older data may be missing `communication_style`, so always normalize before use.
+- `initialize_database()` maintains the configured admin account. If `LOOP_ADMIN_USERNAME` / `LOOP_ADMIN_PASSWORD` are absent, all existing `is_admin` flags are cleared and no bearer-login admin account is available.
 - `create_or_update_agent_for_user()` updates `Agent.system_prompt_base` in place and emits `AGENT_PROFILE_UPDATED`; agent creation is not a one-time bootstrap only.
 - `ensure_system_npc_agent()` runs at startup, and `/api/users/npc-agents/from-senders` creates or reuses stable NPC Agents keyed by external sender ids for group-chat import.
+- `SystemSetting` is created lazily by `/api/simulation/settings`; frontend pages default to `global_active_branch` and only expose manual branch selection to admins or when `allow_user_branch_switch=true`.
 - `post_crud.create_post()` and `feedback_crud.create_feedback_log()` always append matching immutable `EventLog` records. Branch feeds are reconstructed from those events.
 - Plaza correction behavior is projection-based: the latest `FEEDBACK_CREATED` event for a post wins for display in a given branch, while the original `Post` row remains unchanged.
 - `chat_crud.create_chat_log()` also appends a `MESSAGE_RECEIVED` event containing `session_id`, `topic`, and `experiment_mode`. Chat history pages read bounded `ChatLog` slices filtered by branch, session, and topic.
@@ -370,15 +383,16 @@ These are current implementation facts that are easy to miss when skimming the r
 - `/api/chat/{agent_id}/sessions` groups `ChatLog` rows by `session_id` within a branch and returns latest-session summaries for the chat sidebar.
 - `DRIFT_DETECTED` events are appended by the drift-check endpoint only after `evaluate_drift_zero_shot()` returns `is_drifting=true`; skipped or unavailable judges do not block chat storage.
 - `/api/evaluations/blind-test/{agent_id}` is public by design for external raters and returns up to 5 random chat samples; the submit endpoint writes `Evaluation` rows without requiring participant auth.
-- `/api/probes/status` checks whether the authenticated user needs this week's IPIP-120 baseline update, and `/api/probes/submit` bulk-stores `ProbeResponse` rows before refreshing scored personality/value summaries.
-- `/api/counterfactuals/suggestions` uses autobiography plus bounded recent chat/post text to propose decision anchors; it returns `[]` cleanly when there is not enough source material yet.
-- `/api/counterfactuals/submit` is an authenticated identity-memory collection path, not the same as TimeMachine branch forking. It appends a durable counterfactual anchor to `persona_traits`.
+- `/api/probes/status` checks whether the authenticated user, or an admin-selected target Agent, needs this week's main-branch IPIP-120 baseline update. `/api/probes/submit` stores `ProbeResponse.branch_id`, scores responses, writes branch `CORE_MEMORY_UPDATED`, and only persists `User.big_five_scores` / `User.schwartz_values` / `User.core_memory` plus Agent profile updates on `main`.
+- `/api/counterfactuals/suggestions` uses autobiography plus bounded recent chat/post text from the selected branch scope (`main` or `main + branch`) to propose decision anchors; it returns `[]` cleanly when there is not enough source material yet.
+- `/api/counterfactuals/submit` is an authenticated identity-memory collection path, not the same as TimeMachine branch forking. It appends a durable counterfactual anchor to `persona_traits`; branch submissions append events for that branch, while only `main` updates the persisted `User.core_memory`.
 - `TimeMachine` intentionally does not replay raw chat transcripts into the prompt state. It rebuilds compact state such as normalized core memory, counterfactual overrides, intimacy, and a short `current_core_memory` string.
-- `GET /api/agents/{agent_id}/events` is currently only existence-checked and paginated; the router does not enforce bearer ownership or admin auth. Treat it as an internal research endpoint until hardened.
+- `GET /api/agents/{agent_id}/events` now requires bearer auth and enforces owner-or-admin access before returning a bounded branch-specific event page.
 - `POST /api/simulation/fork` now accepts `source_branch_id` plus optional `source_event_id`, validates that the chosen event belongs to the selected branch lineage, reconstructs from that source branch, and stores `from_branch_id` / `parent_event_id` in the fork payload for ancestry tracing.
-- `POST /api/agents/{agent_id}/import_chat` still stores target-agent-perspective memory with `branch_id="main"` today, but it now writes those chunks into pgvector-backed `rag_documents` and also accepts an optional batch-level `topic` tag for retrieval metadata.
+- `POST /api/agents/{agent_id}/import_chat` is admin-only, validates every sender Agent id, writes target-agent-perspective chunks into pgvector-backed `rag_documents` with the requested `branch_id` and optional batch-level `topic`, then calls `sync_group_chat_memory_access()` so all participant Agents can retrieve shared imported context.
 - `DELETE /api/agents/{agent_id}` hard-deletes one Agent's event logs, chat logs, posts, feedbacks, relationships, reflection events, evaluations, and pgvector memories; deleting an NPC Agent also removes its backing system user.
-- User-facing memory upload/search endpoints also do not expose branch parameters today; most vector-memory tooling is effectively main-world-line scoped, while branch divergence mainly comes from `EventLog` + `TimeMachine`.
+- User-facing memory upload/search endpoints still do not expose branch parameters; uploads/search default to the main-world memory scope. Branch-aware vector context primarily comes from chat extraction/import metadata and Git-style `rag_service` filtering.
+- `extract_and_update_memory_background()` can write branch-tagged RAG chunks after chat, but only persists durable facts into `User.core_memory` on `main`; non-main identity divergence is represented through branch `EventLog` and TimeMachine reconstruction.
 - Relationship-aware feed logic already exists in two places: `post_crud.get_posts_for_viewer()` and `/api/agents/*/feed-preview`. Be careful not to regress these to pure reverse-chronological order everywhere.
 
 ## Backend Service Map
@@ -386,9 +400,9 @@ These are current implementation facts that are easy to miss when skimming the r
 Use this section when you need to locate the "real" owner of a behavior quickly:
 
 - `backend/app/main.py`: FastAPI app creation, middleware stack, router mounting, `.env` load, table creation, and optional RAG warmup during lifespan.
-- `backend/app/security.py`: compact signed bearer tokens, admin-key dependency, request-size limit, Redis-backed or fallback rate limit, security headers, and trusted-host enforcement.
-- `backend/app/database.py`: SQLAlchemy engine/session, Postgres/pgvector bootstrap, pgvector RAG table/index creation, and append-only triggers for `event_logs`.
-- `backend/app/models.py`: the research data model, all second-precision timestamps, and the append-only event entity.
+- `backend/app/security.py`: compact signed bearer tokens, admin bearer/machine-key dependencies, request-size limit, Redis-backed or fallback rate limit, security headers, and trusted-host enforcement.
+- `backend/app/database.py`: SQLAlchemy engine/session, Postgres/pgvector bootstrap, schema compatibility helpers, configured admin account seeding, pgvector RAG table/index creation, and append-only triggers for `event_logs`.
+- `backend/app/models.py`: the research data model, all second-precision timestamps, singleton system settings, and the append-only event entity.
 - `backend/app/services/event_store.py`: one sanctioned way to append immutable timeline events with JSON-safe payloads and logging.
 - `backend/app/services/branching.py`: branch id normalization, branch existence, global branch listing, parent-lineage lookup, and fork anchor reconstruction.
 - `backend/app/services/time_machine.py`: branch-aware event replay into compact agent state. This is the heart of counterfactual reconstruction.
@@ -403,6 +417,7 @@ Use this section when you need to locate the "real" owner of a behavior quickly:
 - `backend/app/services/infinity_client.py`: shared async HTTP client with bounded retry/backoff for the external Infinity embedding/reranker services.
 - `backend/app/services/rag_service.py`: Postgres/pgvector-backed memory storage, Infinity embedding/reranking, memory chunking, hybrid retrieval, preload, and strict/fallback behavior.
 - `backend/app/services/scoring_service.py`: IPIP-NEO-120 and PVQ-21 scoring, legacy aggregate preservation, and questionnaire-score mergeback into core memory.
+- `backend/app/services/access_control.py`: shared owner/admin target resolution for Agent-scoped probe and counterfactual workflows.
 - `backend/app/services/consolidation_service.py`: 24-hour record collection, offline sleep-style consolidation, relationship updates, scored episodic memory creation, and working-memory clearing logic.
 - `backend/app/services/feedback_service.py`: post-correction reflection merge path after user feedback.
 
@@ -455,6 +470,8 @@ LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
 LOOP_CONSOLIDATION_LLM_TIMEOUT_SECONDS=60
 LOOP_CONSOLIDATION_LLM_MAX_RETRIES=0
 LOOP_ADMIN_API_KEY=choose_a_private_admin_key
+LOOP_ADMIN_USERNAME=loop_research_admin
+LOOP_ADMIN_PASSWORD=choose_a_private_admin_password
 LOOP_AUTH_SECRET=choose_a_stable_token_signing_secret
 POSTGRES_USER=loop_admin
 POSTGRES_PASSWORD=choose_a_private_postgres_password
@@ -483,7 +500,7 @@ DeepSeek integration details:
 - Uses standard `client.chat.completions.create(...)`.
 - Extracts generated text from `response.choices[0].message.content`.
 - Defaults to `deepseek-v4-pro` for deep chat / thinking paths, `deepseek-chat` for fast chat, and `DEEPSEEK_POST_MODEL` for simulated posts unless overridden by env vars.
-- The checked-in `.env.example` is a minimal baseline for local setup. It includes the core Postgres/Redis variables used by `make infra`, but it still uses the legacy `INFINITY_EMBEDDING_URL` / `INFINITY_RERANKER_URL` names and omits some optional tuning knobs shown above.
+- The checked-in `.env.example` is a minimal baseline for local setup. It includes the core Postgres/Redis variables used by `make infra` and the configured bearer admin account variables, but it still uses the legacy `INFINITY_EMBEDDING_URL` / `INFINITY_RERANKER_URL` names and omits some optional tuning knobs shown above.
 - Chat UI model choices map to backend modes: `fast` uses `DEEPSEEK_CHAT_MODEL`; `deep` uses `DEEPSEEK_MODEL`.
 - Chat experiment modes map to backend generation paths: `mode_alpha` uses the full active-memory/IACL path; `mode_beta` uses the static prompt baseline. Older aliases `full_iacl` and `static_prompt` normalize to those neutral labels.
 - Simulated post generation treats missing/failing DeepSeek as an error (`LLMPostGenerationError` -> API 500) so failed research runs are visible. Private chat still falls back to a local memory-aware reply when remote generation fails after service fallback.
@@ -502,7 +519,7 @@ Tech stack:
 - Tailwind CSS 3
 - Next.js middleware and route handlers for site-level access control
 - Client-side Chinese/English UI dictionary with `LanguageProvider`, `LanguageToggle`, and `localStorage` key `loop_ui_language`
-- Browser `localStorage` for the research participant session token and active Agent metadata
+- Browser `localStorage` for the participant/admin bearer session, active Agent metadata, and admin impersonation backup session
 
 Run frontend:
 
@@ -556,14 +573,14 @@ Restart the Next.js dev server after changing `frontend/.env.local` or `frontend
 
 Implemented pages:
 
-- `/`: participant registration/login, session continuation, questionnaire/autobiography onboarding, and admin-key Agent session switching.
+- `/`: participant registration/login, session continuation, questionnaire/autobiography onboarding, and admin-bearer Agent session switching.
 - `/plaza`: branch-aware public plaza feed, manual Agent post composer, correction modal, and current-user Agent ownership checks.
 - `/chat`: private user-Agent chat with branch selection, independent sessions, `fast`/`deep` model choice, `mode_alpha`/`mode_beta` experiment modes, and drift calibration.
 - The shared nav in `frontend/src/components/NavBar.tsx` now exposes all major app surfaces. Desktop groups daily interaction vs. experiment/admin links, while mobile collapses them into a hamburger menu.
 - `/probes`: authenticated IPIP-120/PVQ-21 probe form for weekly M1-M6 baseline updates.
 - `/counterfactuals`: authenticated life-decision counterfactual anchor form with AI suggestion cards and actual-choice / actual-result fields that writes durable identity memory.
 - `/evaluations/[agent_id]`: public blind-test page that shows sampled chat snippets and records friend/colleague/family authenticity ratings.
-- `/import`: client-side JSON / TXT / HTML group-chat import parser, sender-to-Agent mapping UI, admin-key-assisted NPC sender seeding, date filters, topic tagging, and import submission.
+- `/import`: admin-only client-side JSON / TXT / HTML group-chat import parser, sender-to-Agent mapping UI, admin-bearer NPC sender seeding, date filters, branch selection, topic tagging, and import submission.
 - `/memory`: memory vault/lab for long-form memory upload, semantic search, sleep consolidation, working-memory diagnostics, relationships, and personalized feed preview.
 - `/time-machine`: event timeline viewer and counterfactual branch/fork console.
 - `/lab`: research/admin console for health checks, simulation posts/ticks, Agent switching, destructive Agent deletion, branch selection, JSONL exports, and destructive non-main branch purge.
@@ -575,6 +592,8 @@ Frontend MVP behavior:
 - If a user refreshes after authentication but before questionnaire submission, `/` restores the saved session and lets the user continue.
 - Questionnaire submission sends MBTI, Big Five, Schwartz values, and `autobiography`, then stores `agent_id` and `agent_name`.
 - `frontend/src/lib/api.ts` attaches `Authorization: Bearer <token>` to API calls.
+- Admin sessions are routed to `/lab`; participant sessions with an Agent go to `/plaza`. Admins can temporarily impersonate a selected participant/Agent, with the original admin session saved under `loop_admin_backup`.
+- Branch-aware pages read `GET /api/simulation/settings`; non-admin users are pinned to `global_active_branch` unless `allow_user_branch_switch=true`, while admins can always switch branches.
 - Plaza loads branch-aware posts from `GET /api/plaza/events?branch_id=...`.
 - Plaza fetches posts one page at a time from `GET /api/plaza/events?branch_id=...&skip=...&limit=...`, appends unique posts, and only shows "Load more" while the last page is full.
 - Plaza can publish authenticated Agent posts through `POST /api/agents/me/posts`.
@@ -582,10 +601,11 @@ Frontend MVP behavior:
 - Corrections are sent to `POST /api/posts/{post_id}/feedback`.
 - Chat page calls `GET /api/chat/{agent_id}/sessions?branch_id=...` for the sidebar, paginated `GET /api/agents/{agent_id}/chat?branch_id=...&session_id=...&skip=...&limit=...` for history, and `POST /api/agents/{agent_id}/chat` for new turns.
 - Chat sends `session_id`, `topic`, and `experiment_mode`; `mode_alpha` replies trigger a drift check and may open a calibration modal when recent replies drift from core identity.
-- Probes load `frontend/src/data/questionnaires.json` and submit authenticated weekly validation answers to `/api/probes/submit`.
-- Counterfactuals page can prefill from `GET /api/counterfactuals/suggestions`, then submits authenticated life-decision alternatives to `/api/counterfactuals/submit`, updating durable identity memory.
-- Import page can create or reuse stable NPC Agents for unmapped external senders through `POST /api/users/npc-agents/from-senders` before submitting `POST /api/agents/{agent_id}/import_chat`.
-- Memory and chat pages use `BranchSelector` so a user can inspect or operate on `main` and forked branches.
+- Probes load `frontend/src/data/questionnaires.json`, respect global branch settings, and submit authenticated branch-aware validation answers to `/api/probes/submit`; admins can choose a target Agent.
+- Counterfactuals page can prefill from `GET /api/counterfactuals/suggestions`, respects global branch settings, and submits authenticated branch-aware life-decision alternatives to `/api/counterfactuals/submit`; admins can choose a target Agent.
+- Import page is admin-only. It can create or reuse stable NPC Agents for unmapped external senders through `POST /api/users/npc-agents/from-senders` before submitting branch/topic-tagged records to `POST /api/agents/me/import_chat`.
+- Memory, chat, plaza, probes, and counterfactual pages use `BranchSelector`, but participant branch switching is gated by `SystemSetting.allow_user_branch_switch`.
+- Lab can update global branch exposure through `PATCH /api/simulation/settings`.
 - Lab can delete one Agent at a time through `DELETE /api/agents/{agent_id}`; owners may delete their own Agent, while admins may delete any Agent.
 - `AppProviders` wraps the UI in `LanguageProvider`; page copy is loaded from `frontend/src/locales/dictionary.ts` and persisted as `loop_ui_language`.
 - Site access middleware requires `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`; successful login sets an HTTP-only `loop_site_auth` cookie.
@@ -610,14 +630,16 @@ Frontend UI notes:
 - Supports register and login.
 - Saves `loop_session` to `localStorage` after auth.
 - Restores a partially completed session after refresh.
+- Sends configured admin users directly to `/lab`.
 - If the user has no Agent yet, shows the questionnaire/autobiography onboarding step.
-- Also exposes admin-key-based Agent session switching for research/testing.
+- Also exposes admin-bearer Agent session switching for research/testing when the stored session is an admin.
 
 ### `/plaza`
 
 `frontend/src/app/plaza/page.tsx` is the public square feed.
 
 - Uses `BranchSelector` to switch the active world-line.
+- Reads `/api/simulation/settings`; non-admin users are pinned to the global active branch unless branch switching is enabled.
 - Loads paginated inherited feed items from `GET /api/plaza/events`.
 - Keeps `PLAZA_PAGE_SIZE` and a "load more" workflow to avoid feed blowups.
 - Lets the authenticated user post manually through `POST /api/agents/me/posts`.
@@ -629,6 +651,7 @@ Frontend UI notes:
 `frontend/src/app/chat/page.tsx` is the private user-Agent sync UI.
 
 - Loads available branches per agent.
+- Reads `/api/simulation/settings`; non-admin users are pinned to the global active branch unless branch switching is enabled.
 - Fetches bounded branch/session history from `GET /api/agents/{agent_id}/chat`.
 - Loads sidebar sessions from `GET /api/chat/{agent_id}/sessions`.
 - Keeps `CHAT_HISTORY_PAGE_SIZE` and incremental history loading.
@@ -644,18 +667,20 @@ Frontend UI notes:
 
 - Loads IPIP-120 and PVQ-21 items from `frontend/src/data/questionnaires.json`.
 - Requires a participant session and redirects unauthenticated users to `/`.
+- Reads global branch settings and lets admins target another Agent through `agent_id`.
 - Submits answers to `POST /api/probes/submit`.
-- The backend stores `ProbeResponse` rows, scores Big Five and Schwartz values, merges the scored profile into core memory, and refreshes the Agent profile when an Agent exists.
+- The backend stores branch-aware `ProbeResponse` rows, scores Big Five and Schwartz values, appends a branch `CORE_MEMORY_UPDATED` event, and only persists the scored profile plus Agent prompt refresh on `main`.
 
 ### `/counterfactuals`
 
 `frontend/src/app/counterfactuals/page.tsx` collects identity-relevant life-decision anchors.
 
 - Requires an authenticated participant session.
+- Reads global branch settings and lets admins target another Agent through `agent_id`.
 - Loads AI anchor suggestions from `GET /api/counterfactuals/suggestions`.
 - Collects decision context, optional actual choice / actual result, counterfactual action, and imagined result.
 - Submits to `POST /api/counterfactuals/submit`.
-- The backend appends `COUNTERFACTUAL_ANCHOR_CREATED` and `CORE_MEMORY_UPDATED`, adding the anchor to `persona_traits`.
+- The backend appends `COUNTERFACTUAL_ANCHOR_CREATED` and `CORE_MEMORY_UPDATED`, adding the anchor to `persona_traits`; only `main` submissions persist directly into `User.core_memory`.
 
 ### `/evaluations/[agent_id]`
 
@@ -671,11 +696,12 @@ Frontend UI notes:
 `frontend/src/app/import/page.tsx` imports group-chat transcripts from JSON, TXT, or HTML.
 
 - Parses the file client-side, including delimiter-based plain-text logs and HTML exports.
+- Is admin-only in the current UI and API.
 - Collects sender ids and lets the researcher map them to known Agent ids.
-- Can call `POST /api/users/npc-agents/from-senders` with an admin key to create or reuse stable NPC Agents for unmapped external senders.
+- Can call `POST /api/users/npc-agents/from-senders` with an admin bearer session to create or reuse stable NPC Agents for unmapped external senders.
 - Supports optional start/end date filters and one batch-level topic tag before upload.
-- Sends target-agent-perspective import records to `POST /api/agents/me/import_chat`.
-- The backend differentiates "my messages" from "others' messages" in stored memory metadata.
+- Sends branch-aware target-agent-perspective import records to `POST /api/agents/me/import_chat`.
+- The backend differentiates "my messages" from "others' messages" in stored memory metadata and syncs shared group-chat access across participant Agents.
 
 ### `/memory`
 
@@ -683,6 +709,7 @@ Frontend UI notes:
 
 - Uploads long-form memory chunks.
 - Runs semantic search against local vector memory.
+- Reads global branch settings; branch selection changes working-memory/core-memory reconstruction, while upload/search remain main-scope user memory operations.
 - Triggers sleep-style consolidation.
 - Inspects and clears short-term LangGraph working memory.
 - Shows reconstructed core memory, topic summaries, emotion/energy, relationships, and personalized feed preview.
@@ -703,6 +730,7 @@ Frontend UI notes:
 
 - Checks backend health.
 - Lists agents and branches.
+- Updates participant-facing global branch settings.
 - Triggers one-off simulated posts or global ticks.
 - Can delete one Agent at a time through `DELETE /api/agents/{agent_id}`.
 - Exports chatlogs or feedbacks as JSONL.
@@ -730,6 +758,7 @@ Frontend UI notes:
 
 These event types matter most when debugging branch behavior:
 
+- `SystemSetting` changes are not timeline events; they control experiment exposure, not simulated world state.
 - `AGENT_CREATED`: initial Agent row was created for one user.
 - `AGENT_PROFILE_UPDATED`: questionnaire/core-profile refresh updated the existing Agent prompt base.
 - `POST_CREATED`: a plaza post was published and should appear in branch feed projections.
@@ -748,6 +777,7 @@ When modifying core behavior, verify these invariants before you call the work d
 
 - Branch-aware reads still use `normalize_branch_id()` and respect parent lineage or fork anchors.
 - New write paths append `EventLog` entries if they affect simulation state or branch reconstruction.
+- New admin workflows use `require_admin` for bearer-only UI actions, or `require_admin_or_machine_key` only when machine automation genuinely needs `X-Loop-Admin-Key`.
 - Chat, plaza, and event history endpoints remain paginated with bounded `limit` values.
 - Sensitive values from `.env` never enter logs, responses, screenshots, or commits.
 - Dev servers still bind to `127.0.0.1`.
@@ -763,7 +793,7 @@ When modifying core behavior, verify these invariants before you call the work d
 6. Register or log in as a participant.
 7. Submit MBTI, Big Five, Schwartz values, and a digital autobiography / identity-core memory.
 8. Confirm redirect to `/plaza`.
-9. In `/lab` or backend docs, run `POST /api/simulate/tick` with `X-Loop-Admin-Key`.
+9. Log in with the configured admin account, open `/lab`, and run a simulated tick on the active branch.
 10. Refresh `/plaza` and confirm generated posts appear.
 11. Correct a post from the current user's Agent.
 12. Open `/chat`, send a nightly sync message, and confirm the Agent replies.
@@ -773,7 +803,7 @@ When modifying core behavior, verify these invariants before you call the work d
 16. Open `/evaluations/{agent_id}` in a fresh browser context and submit a blind-test rating.
 17. Open `/memory`, upload/search memory, trigger sleep consolidation, and refresh diagnostics.
 18. Open `/time-machine`, load events, fork a branch from an event, and verify branch selectors include the new branch.
-19. In `/lab`, export chatlogs or feedbacks as JSONL with the admin key.
+19. In `/lab`, export chatlogs or feedbacks as JSONL with the admin bearer session.
 
 If `DEEPSEEK_API_KEY` is missing, `/api/simulate/*` post generation should fail visibly with a server error; chat paths should still return a local fallback reply.
 

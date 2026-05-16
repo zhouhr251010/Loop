@@ -533,7 +533,8 @@ def _build_chat_system_prompt(
             "“上次我们说到哪了”、引用了更早的内容，或者当前问题需要更早聊天记录"
             "才能准确理解，你必须主动调用 `get_historical_chat_logs` 工具翻阅记录，"
             "不要瞎编、不要假装记得。"
-            "工具返回的是同一 branch、同一 session、同一 topic 中，短期记忆窗口之前的更早对话。"
+            "工具返回的是同一 session、同一 topic 中，按 Git 式分支继承读取的更早对话："
+            "main 只读 main，其他 branch 读取 main 加当前 branch。"
         )
 
     alternate_timeline_warning = ""
