@@ -24,12 +24,14 @@ export function NavBar() {
   const navItems = isAdminView
     ? [
         { href: "/lab", label: t.nav.lab },
+        { href: "/sandbox", label: t.nav.sandbox },
         { href: "/time-machine", label: t.nav.timeMachine },
         { href: "/import", label: t.nav.import },
       ]
     : [
         { href: "/plaza", label: t.nav.plaza },
         { href: "/chat", label: t.nav.chat },
+        { href: "/social", label: t.nav.social },
         { href: "/memory", label: t.nav.memory },
         { href: "/probes", label: t.nav.probes },
         { href: "/counterfactuals", label: t.nav.counterfactuals },

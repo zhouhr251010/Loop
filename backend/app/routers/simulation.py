@@ -20,8 +20,9 @@ from app.security import get_current_user, require_admin
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
+    branch_window_filter,
     coerce_timestamp,
-    get_branch_lineage_ids,
+    get_branch_read_windows,
     get_global_branch_ids,
     normalize_branch_id,
 )
@@ -115,14 +116,6 @@ def _validate_source_event(
             detail="Source event not found for this agent.",
         )
 
-    source_lineage = get_branch_lineage_ids(db, source_branch_id)
-    event_branch_id = normalize_branch_id(source_event.branch_id)
-    if event_branch_id not in source_lineage:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Source event is not part of the selected source branch lineage.",
-        )
-
     source_event_timestamp = coerce_timestamp(source_event.timestamp)
     requested_timestamp = coerce_timestamp(rollback_timestamp)
     if (
@@ -133,6 +126,30 @@ def _validate_source_event(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Source event timestamp does not match rollback_timestamp.",
+        )
+
+    read_windows = get_branch_read_windows(
+        db,
+        source_branch_id,
+        requested_timestamp or source_event_timestamp,
+    )
+    visible_event = (
+        db.query(models.EventLog.event_id)
+        .filter(
+            models.EventLog.event_id == source_event.event_id,
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+        )
+        .first()
+    )
+    if visible_event is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Source event is not visible from the selected source branch at that timestamp.",
         )
 
     return source_event
@@ -285,6 +302,9 @@ def fork_simulation_timeline(
             "from_branch_id": source_branch_id,
             "parent_branch_id": source_branch_id,
             "parent_event_id": source_event.event_id if source_event else None,
+            "parent_event_branch_id": normalize_branch_id(source_event.branch_id)
+            if source_event
+            else source_branch_id,
             "rollback_timestamp": fork_in.rollback_timestamp,
             "base_state": reconstructed_state,
             "seed_agent_id": fork_in.agent_id,

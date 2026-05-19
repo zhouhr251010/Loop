@@ -18,12 +18,14 @@ from app.services.access_control import resolve_target_user_for_agent
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
-    branch_scope_ids,
+    branch_window_filter,
+    get_branch_read_windows,
     normalize_branch_id,
 )
 from app.services.core_memory_service import normalize_core_memory
 from app.services.event_store import append_event
 from app.services.llm_service import suggest_counterfactual_anchors
+from app.services.time_machine import TimeMachine
 
 
 router = APIRouter(prefix="/api/counterfactuals", tags=["counterfactuals"])
@@ -60,7 +62,7 @@ def _build_suggestion_context(
     """Collect bounded user-owned text for suggestion generation."""
     since = utc_now_seconds() - timedelta(days=days)
     normalized_branch_id = normalize_branch_id(branch_id)
-    readable_branches = branch_scope_ids(normalized_branch_id)
+    read_windows = get_branch_read_windows(db, normalized_branch_id, utc_now_seconds())
     sections: list[str] = []
 
     autobiography = str(target_user.autobiography or "").strip()
@@ -71,7 +73,12 @@ def _build_suggestion_context(
         db.query(models.ChatLog)
         .filter(
             models.ChatLog.agent_id == target_agent.id,
-            models.ChatLog.branch_id.in_(readable_branches),
+            branch_window_filter(
+                models.ChatLog.branch_id,
+                models.ChatLog.timestamp,
+                None,
+                read_windows,
+            ),
             models.ChatLog.timestamp >= since,
         )
         .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
@@ -98,7 +105,12 @@ def _build_suggestion_context(
         db.query(models.EventLog)
         .filter(
             models.EventLog.agent_id == target_agent.id,
-            models.EventLog.branch_id.in_(readable_branches),
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
             models.EventLog.event_type == "POST_CREATED",
             models.EventLog.timestamp >= since,
         )
@@ -191,6 +203,15 @@ def submit_counterfactual_anchor(
         )
     timestamp = utc_now_seconds()
     anchor_memory = _format_anchor_memory(anchor)
+    if branch_id == DEFAULT_BRANCH_ID:
+        core_memory = normalize_core_memory(target_user.core_memory)
+    else:
+        reconstructed_state = TimeMachine(db).reconstruct_state(
+            agent_id=target_agent.id,
+            target_timestamp=timestamp,
+            branch_id=branch_id,
+        )
+        core_memory = normalize_core_memory(reconstructed_state.get("core_memory"))
     payload = {
         "user_id": target_user.id,
         "branch_id": branch_id,
@@ -212,7 +233,6 @@ def submit_counterfactual_anchor(
         commit=False,
     )
 
-    core_memory = normalize_core_memory(target_user.core_memory)
     existing_traits = core_memory["persona_traits"].strip()
     anchor_line = f"- {anchor_memory}"
     if anchor_memory not in existing_traits:

@@ -22,7 +22,12 @@ from app.schemas.chat import (
     DriftCheckOut,
 )
 from app.security import get_current_user
-from app.services.branching import branch_exists, normalize_branch_id
+from app.services.branching import (
+    branch_exists,
+    branch_window_filter,
+    get_branch_read_windows,
+    normalize_branch_id,
+)
 from app.services.core_memory_service import format_core_memory_for_prompt
 from app.services.drift_detector import evaluate_drift_zero_shot
 from app.services.event_store import append_event
@@ -245,12 +250,14 @@ async def _create_chat_reply(
                 session_id=session_id,
                 experiment_mode=experiment_mode,
                 topic=topic,
+                session_type=chat_in.session_type,
             )
             chat_log_out = ChatLogOut.model_validate(chat_log)
             chat_log_out.branch_id = branch_id
             chat_log_out.session_id = session_id
             chat_log_out.experiment_mode = experiment_mode
             chat_log_out.topic = topic
+            chat_log_out.session_type = chat_in.session_type
         except Exception as exc:
             logger.exception(
                 "[Chat Turn Error] turn_id=%s storage or response shaping failed",
@@ -375,13 +382,20 @@ def get_agent_chat_history(
         )
 
     normalized_branch_id = normalize_branch_id(branch_id)
+    read_windows = get_branch_read_windows(db, normalized_branch_id)
     normalized_session_id = _normalize_session_id(session_id)
     rows = (
         db.query(models.ChatLog)
         .filter(
             models.ChatLog.agent_id == agent_id,
-            models.ChatLog.branch_id == normalized_branch_id,
+            branch_window_filter(
+                models.ChatLog.branch_id,
+                models.ChatLog.timestamp,
+                None,
+                read_windows,
+            ),
             models.ChatLog.session_id == normalized_session_id,
+            models.ChatLog.session_type == models.SessionType.HUMAN_TO_AGENT.value,
         )
         .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
         .offset(skip)
@@ -393,6 +407,9 @@ def get_agent_chat_history(
         {
             "id": row.id,
             "agent_id": row.agent_id,
+            "sender_user_id": row.sender_user_id,
+            "receiver_user_id": row.receiver_user_id,
+            "group_id": row.group_id,
             "user_message": row.user_message,
             "agent_reply": row.agent_reply,
             "timestamp": row.timestamp,
@@ -400,6 +417,7 @@ def get_agent_chat_history(
             "session_id": row.session_id,
             "topic": getattr(row, "topic", "general"),
             "experiment_mode": _normalize_experiment_mode(row.experiment_mode),
+            "session_type": row.session_type,
         }
         for row in rows
     ]
@@ -430,9 +448,16 @@ def get_agent_chat_sessions(
         )
 
     normalized_branch_id = normalize_branch_id(branch_id)
+    read_windows = get_branch_read_windows(db, normalized_branch_id)
     filters = [
         models.ChatLog.agent_id == agent_id,
-        models.ChatLog.branch_id == normalized_branch_id,
+        branch_window_filter(
+            models.ChatLog.branch_id,
+            models.ChatLog.timestamp,
+            None,
+            read_windows,
+        ),
+        models.ChatLog.session_type == models.SessionType.HUMAN_TO_AGENT.value,
     ]
 
     latest_rows = (
@@ -455,7 +480,7 @@ def get_agent_chat_sessions(
         .join(
             models.ChatLog,
             (models.ChatLog.agent_id == agent_id)
-            & (models.ChatLog.branch_id == normalized_branch_id)
+            & (models.ChatLog.session_type == models.SessionType.HUMAN_TO_AGENT.value)
             & (models.ChatLog.session_id == latest_rows.c.session_id)
             & (models.ChatLog.id == latest_rows.c.latest_id),
         )
@@ -476,8 +501,14 @@ def get_agent_chat_sessions(
             db.query(models.ChatLog)
             .filter(
                 models.ChatLog.agent_id == agent_id,
-                models.ChatLog.branch_id == normalized_branch_id,
+                branch_window_filter(
+                    models.ChatLog.branch_id,
+                    models.ChatLog.timestamp,
+                    None,
+                    read_windows,
+                ),
                 models.ChatLog.session_id == normalized_session_id,
+                models.ChatLog.session_type == models.SessionType.HUMAN_TO_AGENT.value,
             )
             .order_by(models.ChatLog.timestamp.asc(), models.ChatLog.id.asc())
             .first()
@@ -535,7 +566,12 @@ async def check_agent_identity_drift(
         db.query(models.ChatLog)
         .filter(
             models.ChatLog.agent_id == agent_id,
-            models.ChatLog.branch_id == branch_id,
+            branch_window_filter(
+                models.ChatLog.branch_id,
+                models.ChatLog.timestamp,
+                None,
+                get_branch_read_windows(db, branch_id),
+            ),
             models.ChatLog.session_id == session_id,
             models.ChatLog.topic == topic,
         )

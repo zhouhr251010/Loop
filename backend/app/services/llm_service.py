@@ -409,7 +409,7 @@ def _build_identity_prompt(
     branch_core_memory = (reconstructed_core_memory or "").strip()
     if reconstructed_core_memory is not None:
         identity_context = _build_identity_context(
-            {**user_data, "core_memory": None},
+            {**user_data, "core_memory": None, "autobiography": None},
             include_core_memory=False,
         )
         core_memory_prompt = (
@@ -461,7 +461,7 @@ def _build_chat_system_prompt(
     is_alternate_timeline = normalized_branch_id != "main"
     branch_core_memory = (reconstructed_core_memory or "").strip()
     prompt_user_data = (
-        {**user_data, "core_memory": None}
+        {**user_data, "core_memory": None, "autobiography": None}
         if is_alternate_timeline
         else user_data
     )
@@ -477,7 +477,7 @@ def _build_chat_system_prompt(
         if is_alternate_timeline
         else format_core_memory_for_prompt(user_data.get("core_memory"))
     )
-    autobiography = (user_data.get("autobiography") or "").strip()
+    autobiography = (prompt_user_data.get("autobiography") or "").strip()
     memory_instruction = ""
     if autobiography:
         memory_instruction = (
@@ -533,8 +533,8 @@ def _build_chat_system_prompt(
             "“上次我们说到哪了”、引用了更早的内容，或者当前问题需要更早聊天记录"
             "才能准确理解，你必须主动调用 `get_historical_chat_logs` 工具翻阅记录，"
             "不要瞎编、不要假装记得。"
-            "工具返回的是同一 session、同一 topic 中，按 Git 式分支继承读取的更早对话："
-            "main 只读 main，其他 branch 读取 main 加当前 branch。"
+            "工具返回的是同一 session、同一 topic 中，按回溯分支继承读取的更早对话："
+            "main 只读 main；其他 branch 只继承父时间线到分叉点，之后只读当前 branch。"
         )
 
     alternate_timeline_warning = ""
@@ -1392,6 +1392,7 @@ async def chat_with_agent(
             user_id=user_id,
             agent_id=agent_id,
             thread_id=thread_id,
+            branch_id=normalized_branch_id,
             context_messages=history_messages,
             core_memory=user_data.get("core_memory") or {},
         )

@@ -1,6 +1,7 @@
 """SQLAlchemy models for Loop's research data core."""
 
 from datetime import datetime
+from enum import Enum
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -18,6 +19,29 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from .database import Base
+
+
+class SessionType(str, Enum):
+    """Conversation topology supported by Loop chat logs."""
+
+    HUMAN_TO_AGENT = "Human_to_Agent"
+    HUMAN_TO_HUMAN = "Human_to_Human"
+    AGENT_TO_AGENT = "Agent_to_Agent"
+    GROUP_SHARED = "Group_Shared"
+
+
+class GroupType(str, Enum):
+    """Allowed room species for Boundary 1 proton isolation."""
+
+    HUMAN_ONLY = "HUMAN_ONLY"
+    AGENT_ONLY = "AGENT_ONLY"
+
+
+class GroupEntityType(str, Enum):
+    """Entity classes that can join Loop groups."""
+
+    USER = "USER"
+    AGENT = "AGENT"
 
 
 def utc_now_seconds() -> datetime:
@@ -188,13 +212,86 @@ class FeedbackLog(Base):
     user = relationship("User", back_populates="feedback_logs")
 
 
+class Group(Base):
+    """N-to-N chat room with strict human/agent species isolation."""
+
+    __tablename__ = "groups"
+
+    id = Column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+        index=True,
+    )
+    name = Column(String(128), nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    topic = Column(String(255), nullable=True)
+    group_type = Column(String(32), nullable=False, index=True)
+
+    owner = relationship("User")
+    members = relationship("GroupMember", back_populates="group")
+    summaries = relationship("GroupSummary", back_populates="group")
+    chat_logs = relationship("ChatLog", back_populates="group")
+
+
+class GroupMember(Base):
+    """One member entity inside a Boundary-1-isolated chat room."""
+
+    __tablename__ = "group_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "entity_id",
+            "entity_type",
+            name="uq_group_member_entity",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(String(36), ForeignKey("groups.id"), nullable=False, index=True)
+    entity_id = Column(String(128), nullable=False, index=True)
+    entity_type = Column(String(16), nullable=False, index=True)
+    role = Column(String(32), default="member", nullable=False)
+
+    group = relationship("Group", back_populates="members")
+
+
+class GroupSummary(Base):
+    """Rolling compressed context for a chat room."""
+
+    __tablename__ = "group_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "branch_id",
+            name="uix_group_summary_branch",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(
+        String(36),
+        ForeignKey("groups.id"),
+        nullable=False,
+        index=True,
+    )
+    branch_id = Column(String(128), default="main", nullable=False, index=True)
+    summary_text = Column(Text, default="", nullable=False)
+    last_summarized_message_id = Column(String(128), nullable=True)
+
+    group = relationship("Group", back_populates="summaries")
+
+
 class ChatLog(Base):
-    """Daily private sync conversation between a user and their agent."""
+    """Conversation turn storage for private, peer, and shared sessions."""
 
     __tablename__ = "chat_logs"
 
     id = Column(Integer, primary_key=True, index=True)
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, index=True)
+    sender_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    receiver_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    group_id = Column(String(36), ForeignKey("groups.id"), nullable=True, index=True)
     branch_id = Column(String(128), default="main", nullable=False, index=True)
     session_id = Column(
         String(64),
@@ -209,11 +306,20 @@ class ChatLog(Base):
         nullable=False,
         index=True,
     )
+    session_type = Column(
+        String(32),
+        default=SessionType.HUMAN_TO_AGENT.value,
+        nullable=False,
+        index=True,
+    )
+    is_memory_extracted = Column(Boolean, default=False, nullable=False, index=True)
+    is_read = Column(Boolean, default=False, nullable=False, index=True)
     user_message = Column(Text, nullable=False)
     agent_reply = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=utc_now_seconds, nullable=False)
 
     agent = relationship("Agent", back_populates="chat_logs")
+    group = relationship("Group", back_populates="chat_logs")
 
 
 class Evaluation(Base):

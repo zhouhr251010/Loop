@@ -9,6 +9,7 @@ import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
@@ -16,10 +17,18 @@ from sqlalchemy.orm import Session
 from app import models
 from app.database import SessionLocal
 from app.models import utc_now_seconds
+from app.services.branching import (
+    DEFAULT_BRANCH_ID,
+    branch_exists,
+    branch_window_filter,
+    get_branch_read_windows,
+    normalize_branch_id,
+)
 from app.services.core_memory_service import merge_core_memory_insight
 from app.services.event_store import append_event
 from app.services.llm_service import build_async_deepseek_client
 from app.services.rag_service import add_scored_memories
+from app.services.time_machine import TimeMachine
 
 
 logger = logging.getLogger(__name__)
@@ -56,6 +65,7 @@ def _aborted_consolidation_result(
     agent_id: int,
     records_count: int,
     reason: str,
+    branch_id: str = DEFAULT_BRANCH_ID,
 ) -> dict[str, Any]:
     """Return a safe no-op sleep result after preserving short-term memory."""
     return {
@@ -65,6 +75,7 @@ def _aborted_consolidation_result(
         ),
         "user_id": user_id,
         "agent_id": agent_id,
+        "branch_id": branch_id,
         "records_consolidated": records_count,
         "chunks_added": 0,
         "graph_triples_extracted": 0,
@@ -172,40 +183,69 @@ def _records_for_prompt(records: list[str]) -> list[str]:
 def _collect_daily_records(
     db: Session,
     source_agent: models.Agent,
+    branch_id: str = DEFAULT_BRANCH_ID,
 ) -> tuple[list[str], list[models.Agent]]:
     """Build timestamped daily records for episodic and social consolidation."""
     since = utc_now_seconds() - timedelta(hours=24)
+    normalized_branch_id = normalize_branch_id(branch_id)
+    read_windows = get_branch_read_windows(db, normalized_branch_id)
 
-    chat_logs = (
-        db.query(models.ChatLog)
+    message_events = (
+        db.query(models.EventLog)
         .filter(
-            models.ChatLog.agent_id == source_agent.id,
-            models.ChatLog.timestamp >= since,
+            models.EventLog.agent_id == source_agent.id,
+            models.EventLog.event_type.in_(
+                [
+                    "MESSAGE_RECEIVED",
+                    "HUMAN_MESSAGE_RECEIVED",
+                    "GROUP_MESSAGE_RECEIVED",
+                ],
+            ),
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+            models.EventLog.timestamp >= since,
         )
-        .order_by(models.ChatLog.timestamp.desc(), models.ChatLog.id.desc())
+        .order_by(models.EventLog.timestamp.desc(), models.EventLog.event_id.desc())
         .limit(DAILY_CHAT_LOG_LIMIT)
         .all()
     )
-    chat_logs = list(reversed(chat_logs))
-    own_posts = (
-        db.query(models.Post)
+    message_events = list(reversed(message_events))
+    own_post_events = (
+        db.query(models.EventLog)
         .filter(
-            models.Post.agent_id == source_agent.id,
-            models.Post.timestamp >= since,
+            models.EventLog.agent_id == source_agent.id,
+            models.EventLog.event_type == "POST_CREATED",
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+            models.EventLog.timestamp >= since,
         )
-        .order_by(models.Post.timestamp.desc(), models.Post.id.desc())
+        .order_by(models.EventLog.timestamp.desc(), models.EventLog.event_id.desc())
         .limit(DAILY_OWN_POST_LIMIT)
         .all()
     )
-    own_posts = list(reversed(own_posts))
-    visible_posts = (
-        db.query(models.Post)
-        .join(models.Agent)
+    own_post_events = list(reversed(own_post_events))
+    visible_post_events = (
+        db.query(models.EventLog)
         .filter(
-            models.Post.agent_id != source_agent.id,
-            models.Post.timestamp >= since,
+            models.EventLog.agent_id != source_agent.id,
+            models.EventLog.event_type == "POST_CREATED",
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+            models.EventLog.timestamp >= since,
         )
-        .order_by(models.Post.timestamp.asc(), models.Post.id.asc())
+        .order_by(models.EventLog.timestamp.asc(), models.EventLog.event_id.asc())
         .limit(100)
         .all()
     )
@@ -218,30 +258,61 @@ def _collect_daily_records(
     )
 
     records: list[str] = []
-    for chat in chat_logs:
+    for event in message_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.event_type == "MESSAGE_RECEIVED":
+            records.append(
+                (
+                    f"[{_format_timestamp(event.timestamp)}] 私聊同步："
+                    f"用户说「{payload.get('user_message', '')}」；"
+                    f"{source_agent.agent_name} 回复「{payload.get('agent_reply', '')}」。"
+                ),
+            )
+            continue
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            continue
+        if event.event_type == "HUMAN_MESSAGE_RECEIVED":
+            records.append(
+                (
+                    f"[{_format_timestamp(event.timestamp)}] 真人私聊："
+                    f"user_id={payload.get('sender_user_id')} 说「{content}」。"
+                ),
+            )
+        elif event.event_type == "GROUP_MESSAGE_RECEIVED":
+            records.append(
+                (
+                    f"[{_format_timestamp(event.timestamp)}] 群聊消息："
+                    f"group_id={payload.get('group_id')} "
+                    f"sender_user_id={payload.get('sender_user_id')} "
+                    f"speaker_agent_id={payload.get('speaker_agent_id')} "
+                    f"说「{content}」。"
+                ),
+            )
+
+    for event in own_post_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            continue
         records.append(
             (
-                f"[{_format_timestamp(chat.timestamp)}] 私聊同步："
-                f"用户说「{chat.user_message}」；"
-                f"{source_agent.agent_name} 回复「{chat.agent_reply}」。"
+                f"[{_format_timestamp(event.timestamp)}] "
+                f"{source_agent.agent_name} 在广场发帖：「{content}」。"
             ),
         )
 
-    for post in own_posts:
+    for event in visible_post_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            continue
+        agent_name = getattr(event.agent, "agent_name", "Unknown Agent")
         records.append(
             (
-                f"[{_format_timestamp(post.timestamp)}] "
-                f"{source_agent.agent_name} 在广场发帖：「{post.content}」。"
-            ),
-        )
-
-    for post in visible_posts:
-        agent_name = getattr(post.agent, "agent_name", "Unknown Agent")
-        records.append(
-            (
-                f"[{_format_timestamp(post.timestamp)}] "
-                f"广场上 agent_id={post.agent_id} 的 {agent_name} 发帖："
-                f"「{post.content}」。"
+                f"[{_format_timestamp(event.timestamp)}] "
+                f"广场上 agent_id={event.agent_id} 的 {agent_name} 发帖："
+                f"「{content}」。"
             ),
         )
 
@@ -559,6 +630,62 @@ def _apply_relationship_changes(
     return applied
 
 
+def _append_branch_relationship_changes(
+    db: Session,
+    source_agent_id: int,
+    branch_id: str,
+    changes: list[dict[str, float | int]],
+) -> list[dict[str, float | int]]:
+    """Append branch-local relationship deltas without touching Relationship rows."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    state = TimeMachine(db).reconstruct_state(
+        agent_id=source_agent_id,
+        target_timestamp=utc_now_seconds(),
+        branch_id=normalized_branch_id,
+    )
+    intimacy = {
+        str(key): float(value)
+        for key, value in (state.get("intimacy") or {}).items()
+        if isinstance(value, (int, float))
+    }
+    applied: list[dict[str, float | int]] = []
+    timestamp = utc_now_seconds()
+    for change in changes:
+        target_agent_id = int(change["target_agent_id"])
+        if target_agent_id == source_agent_id:
+            continue
+
+        affinity_change = float(change["affinity_change"])
+        previous_score = float(intimacy.get(str(target_agent_id), 0.0))
+        affinity_score = max(-100.0, min(100.0, previous_score + affinity_change))
+        intimacy[str(target_agent_id)] = affinity_score
+        append_event(
+            db,
+            agent_id=source_agent_id,
+            branch_id=normalized_branch_id,
+            event_type="RELATIONSHIP_CHANGED",
+            payload={
+                "target_agent_id": target_agent_id,
+                "affinity_change": affinity_change,
+                "affinity_score": affinity_score,
+                "previous_affinity_score": previous_score,
+                "source": "sleep_consolidation_branch",
+            },
+            timestamp=timestamp,
+            commit=False,
+        )
+        applied.append(
+            {
+                "target_agent_id": target_agent_id,
+                "affinity_change": affinity_change,
+                "affinity_score": affinity_score,
+            },
+        )
+
+    db.commit()
+    return applied
+
+
 def _relationship_changes_from_triples(
     triples: list[dict[str, Any]],
 ) -> list[dict[str, float | int]]:
@@ -626,13 +753,28 @@ def _create_daily_events(
 ) -> int:
     """Persist Layer 2 daily event nodes."""
     for event in events:
-        db.add(
-            models.ReflectionEvent(
-                agent_id=source_agent.id,
-                level="daily_event",
-                content=event,
-                source_record_count=source_record_count,
-            ),
+        reflection = models.ReflectionEvent(
+            agent_id=source_agent.id,
+            level="daily_event",
+            content=event,
+            source_record_count=source_record_count,
+        )
+        db.add(reflection)
+        db.flush()
+        append_event(
+            db,
+            agent_id=source_agent.id,
+            branch_id=DEFAULT_BRANCH_ID,
+            event_type="REFLECTION_CREATED",
+            payload={
+                "source": "sleep_consolidation",
+                "reflection_event_id": reflection.id,
+                "reflection_id": f"reflection_event:{reflection.id}",
+                "level": "daily_event",
+                "content": event,
+                "source_record_count": source_record_count,
+            },
+            commit=False,
         )
     db.commit()
     return len(events)
@@ -775,7 +917,7 @@ def _persist_high_level_insight(
 
     now = utc_now_seconds()
     db.add(
-        models.ReflectionEvent(
+        reflection := models.ReflectionEvent(
             agent_id=source_agent.id,
             level="high_level_insight",
             content=clean_insight,
@@ -783,10 +925,207 @@ def _persist_high_level_insight(
             reflected_at=now,
         ),
     )
+    db.flush()
+    source_reflection_ids = [
+        f"reflection_event:{event.id}"
+        for event in pending_events
+    ]
+    append_event(
+        db,
+        agent_id=source_agent.id,
+        branch_id=DEFAULT_BRANCH_ID,
+        event_type="REFLECTION_CREATED",
+        payload={
+            "source": "sleep_consolidation",
+            "reflection_event_id": reflection.id,
+            "reflection_id": f"reflection_event:{reflection.id}",
+            "level": "high_level_insight",
+            "content": clean_insight,
+            "source_record_count": len(pending_events),
+            "source_daily_reflection_ids": source_reflection_ids,
+        },
+        commit=False,
+    )
     for event in pending_events:
         event.reflected_at = now
     db.commit()
     merge_core_memory_insight(db=db, user_id=user_id, insight=clean_insight)
+    return 1, True
+
+
+def _branch_pending_daily_reflections(
+    db: Session,
+    source_agent: models.Agent,
+    branch_id: str,
+) -> list[dict[str, str]]:
+    """Return visible branch daily reflections that have not been reflected yet."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    read_windows = get_branch_read_windows(db, normalized_branch_id)
+    events = (
+        db.query(models.EventLog)
+        .filter(
+            models.EventLog.agent_id == source_agent.id,
+            models.EventLog.event_type == "REFLECTION_CREATED",
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+        )
+        .order_by(models.EventLog.timestamp.asc(), models.EventLog.event_id.asc())
+        .all()
+    )
+    reflected_ids: set[str] = set()
+    daily_reflections: list[dict[str, str]] = []
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        level = str(payload.get("level") or "").strip()
+        if level == "high_level_insight":
+            raw_ids = payload.get("source_daily_reflection_ids")
+            if isinstance(raw_ids, list):
+                reflected_ids.update(str(item) for item in raw_ids if str(item).strip())
+            continue
+        if level != "daily_event":
+            continue
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            continue
+        reflection_id = str(
+            payload.get("reflection_id") or f"event_log:{event.event_id}",
+        ).strip()
+        daily_reflections.append(
+            {
+                "reflection_id": reflection_id,
+                "content": content,
+            },
+        )
+
+    return [
+        item
+        for item in daily_reflections
+        if item["reflection_id"] not in reflected_ids
+    ][:REFLECTION_BATCH_SIZE]
+
+
+def _planned_branch_daily_reflections(
+    daily_events: list[str],
+) -> list[dict[str, str]]:
+    """Create stable ids for daily reflection events before they are appended."""
+    return [
+        {
+            "reflection_id": f"branch_reflection:{uuid4()}",
+            "content": event,
+        }
+        for event in daily_events
+        if str(event or "").strip()
+    ]
+
+
+async def _plan_branch_high_level_insight(
+    db: Session,
+    source_agent: models.Agent,
+    branch_id: str,
+    planned_daily_reflections: list[dict[str, str]],
+) -> tuple[str, list[str]]:
+    """Plan branch-local high-level insight from visible pending event-log reflections."""
+    pending_reflections = _branch_pending_daily_reflections(
+        db,
+        source_agent,
+        branch_id,
+    )
+    reflection_records = [
+        *pending_reflections,
+        *planned_daily_reflections,
+    ]
+    if len(reflection_records) < REFLECTION_BATCH_SIZE:
+        return "", []
+
+    selected_records = reflection_records[:REFLECTION_BATCH_SIZE]
+    insight = await _deep_reflect_on_event_texts(
+        source_agent=source_agent,
+        event_texts=[record["content"] for record in selected_records],
+    )
+    return insight, [record["reflection_id"] for record in selected_records]
+
+
+def _append_branch_daily_reflections(
+    db: Session,
+    source_agent: models.Agent,
+    branch_id: str,
+    planned_daily_reflections: list[dict[str, str]],
+    source_record_count: int,
+) -> int:
+    """Append branch-local daily reflections without touching ReflectionEvent."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    timestamp = utc_now_seconds()
+    for reflection in planned_daily_reflections:
+        content = str(reflection.get("content") or "").strip()
+        reflection_id = str(reflection.get("reflection_id") or "").strip()
+        if not content or not reflection_id:
+            continue
+        append_event(
+            db,
+            agent_id=source_agent.id,
+            branch_id=normalized_branch_id,
+            event_type="REFLECTION_CREATED",
+            payload={
+                "source": "sleep_consolidation_branch",
+                "reflection_id": reflection_id,
+                "level": "daily_event",
+                "content": content,
+                "source_record_count": source_record_count,
+            },
+            timestamp=timestamp,
+            commit=False,
+        )
+    db.commit()
+    return len(planned_daily_reflections)
+
+
+def _append_branch_high_level_insight(
+    db: Session,
+    source_agent: models.Agent,
+    user_id: int,
+    branch_id: str,
+    insight: str,
+    source_daily_reflection_ids: list[str],
+) -> tuple[int, bool]:
+    """Append branch-local reflection and core-memory events without physical writes."""
+    clean_insight = (insight or "").strip()
+    if not clean_insight:
+        return 0, False
+    normalized_branch_id = normalize_branch_id(branch_id)
+    append_event(
+        db,
+        agent_id=source_agent.id,
+        branch_id=normalized_branch_id,
+        event_type="REFLECTION_CREATED",
+        payload={
+            "source": "sleep_consolidation_branch",
+            "reflection_id": f"branch_reflection:{uuid4()}",
+            "level": "high_level_insight",
+            "content": clean_insight,
+            "source_record_count": len(source_daily_reflection_ids),
+            "source_daily_reflection_ids": source_daily_reflection_ids,
+        },
+        commit=False,
+    )
+    reconstructed_state = TimeMachine(db).reconstruct_state(
+        agent_id=source_agent.id,
+        target_timestamp=utc_now_seconds(),
+        branch_id=normalized_branch_id,
+    )
+    merge_core_memory_insight(
+        db=db,
+        user_id=user_id,
+        agent_id=source_agent.id,
+        branch_id=normalized_branch_id,
+        insight=clean_insight,
+        source="sleep_consolidation_branch_reflection",
+        persist_user_core_memory=False,
+        base_core_memory=reconstructed_state.get("core_memory"),
+    )
     return 1, True
 
 
@@ -930,8 +1269,16 @@ def clear_graph_working_memory(
     )
 
 
-async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[str, Any]:
+async def _consolidate_daily_memory_with_db(
+    db: Session,
+    user_id: int,
+    branch_id: str = DEFAULT_BRANCH_ID,
+) -> dict[str, Any]:
     """Convert one user's daily short-term traces into long memory and relations."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise ValueError("Branch not found.")
+
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None or user.agent is None:
         raise ValueError("User or agent not found.")
@@ -941,25 +1288,45 @@ async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[s
         f"[Sleep Consolidation] Processing short-term memories for "
         f"Agent {source_agent.id}...",
     )
-    records, candidate_agents = _collect_daily_records(db, source_agent)
+    records, candidate_agents = _collect_daily_records(
+        db,
+        source_agent,
+        normalized_branch_id,
+    )
     chunks_added = 0
     graph_triples: list[dict[str, Any]] = []
+    relationship_changes: list[dict[str, float | int]] = []
     daily_events_created = 0
     high_level_insights_created = 0
     core_memory_updated = False
     scored_memories: list[dict[str, Any]] = []
     daily_events: list[str] = []
+    planned_branch_daily_reflections: list[dict[str, str]] = []
+    branch_high_level_source_ids: list[str] = []
     high_level_insight = ""
 
     try:
         if records:
             scored_memories = await _score_episodic_memories(source_agent, records)
             daily_events = await _daily_event_summaries(source_agent, records)
-            high_level_insight = await _plan_high_level_insight(
-                db=db,
-                source_agent=source_agent,
-                planned_daily_events=daily_events,
-            )
+            if normalized_branch_id == DEFAULT_BRANCH_ID:
+                high_level_insight = await _plan_high_level_insight(
+                    db=db,
+                    source_agent=source_agent,
+                    planned_daily_events=daily_events,
+                )
+            else:
+                planned_branch_daily_reflections = _planned_branch_daily_reflections(
+                    daily_events,
+                )
+                high_level_insight, branch_high_level_source_ids = (
+                    await _plan_branch_high_level_insight(
+                        db=db,
+                        source_agent=source_agent,
+                        branch_id=normalized_branch_id,
+                        planned_daily_reflections=planned_branch_daily_reflections,
+                    )
+                )
 
         graph_triples = await _extract_graph_triples(
             source_agent,
@@ -985,6 +1352,7 @@ async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[s
             agent_id=source_agent.id,
             records_count=len(records),
             reason=str(exc),
+            branch_id=normalized_branch_id,
         )
 
     if records:
@@ -992,43 +1360,77 @@ async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[s
             user_id=user_id,
             agent_id=source_agent.id,
             memories=scored_memories,
+            branch_id=normalized_branch_id,
         )
-        daily_events_created = _create_daily_events(
-            db=db,
-            source_agent=source_agent,
-            events=daily_events,
-            source_record_count=len(records),
-        )
-        high_level_insights_created, core_memory_updated = (
-            _persist_high_level_insight(
+        if normalized_branch_id == DEFAULT_BRANCH_ID:
+            daily_events_created = _create_daily_events(
                 db=db,
                 source_agent=source_agent,
-                user_id=user_id,
-                insight=high_level_insight,
+                events=daily_events,
+                source_record_count=len(records),
             )
-        )
+            high_level_insights_created, core_memory_updated = (
+                _persist_high_level_insight(
+                    db=db,
+                    source_agent=source_agent,
+                    user_id=user_id,
+                    insight=high_level_insight,
+                )
+            )
+        else:
+            daily_events_created = _append_branch_daily_reflections(
+                db=db,
+                source_agent=source_agent,
+                branch_id=normalized_branch_id,
+                planned_daily_reflections=planned_branch_daily_reflections,
+                source_record_count=len(records),
+            )
+            high_level_insights_created, core_memory_updated = (
+                _append_branch_high_level_insight(
+                    db=db,
+                    source_agent=source_agent,
+                    user_id=user_id,
+                    branch_id=normalized_branch_id,
+                    insight=high_level_insight,
+                    source_daily_reflection_ids=branch_high_level_source_ids,
+                )
+            )
 
-    relationship_updates = _apply_relationship_changes(
-        db=db,
-        source_agent_id=source_agent.id,
-        changes=relationship_changes,
-    )
+    if normalized_branch_id == DEFAULT_BRANCH_ID:
+        relationship_updates = _apply_relationship_changes(
+            db=db,
+            source_agent_id=source_agent.id,
+            changes=relationship_changes,
+        )
+    else:
+        relationship_updates = _append_branch_relationship_changes(
+            db=db,
+            source_agent_id=source_agent.id,
+            branch_id=normalized_branch_id,
+            changes=relationship_changes,
+        )
     graph_memory_cleared = _clear_graph_working_memory(
         agent_id=source_agent.id,
         user_id=user_id,
+        branch_id=normalized_branch_id,
     )
     if graph_memory_cleared:
         append_event(
             db,
             agent_id=source_agent.id,
+            branch_id=normalized_branch_id,
             event_type="WORKING_MEMORY_CLEARED",
-            payload={"source": "sleep_consolidation"},
+            payload={
+                "source": "sleep_consolidation",
+                "branch_id": normalized_branch_id,
+            },
         )
 
     return {
         "message": "Agent sleep consolidation completed.",
         "user_id": user_id,
         "agent_id": source_agent.id,
+        "branch_id": normalized_branch_id,
         "records_consolidated": len(records),
         "chunks_added": chunks_added,
         "graph_triples_extracted": len(graph_triples),
@@ -1043,13 +1445,14 @@ async def _consolidate_daily_memory_with_db(db: Session, user_id: int) -> dict[s
 async def consolidate_daily_memory(
     user_id: int,
     db: Session | None = None,
+    branch_id: str = DEFAULT_BRANCH_ID,
 ) -> dict[str, Any]:
     """Run one daily memory-consolidation cycle for a user's agent."""
     if db is not None:
-        return await _consolidate_daily_memory_with_db(db, user_id)
+        return await _consolidate_daily_memory_with_db(db, user_id, branch_id)
 
     owned_db = SessionLocal()
     try:
-        return await _consolidate_daily_memory_with_db(owned_db, user_id)
+        return await _consolidate_daily_memory_with_db(owned_db, user_id, branch_id)
     finally:
         owned_db.close()

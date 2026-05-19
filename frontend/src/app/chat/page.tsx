@@ -579,6 +579,7 @@ export default function ChatPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : copy.sendFailed);
+      setInput((current) => current || content);
     } finally {
       setIsSending(false);
     }
@@ -1056,7 +1057,6 @@ export default function ChatPage() {
                         !session.agent_id ||
                         !currentBranch ||
                         !currentSessionId ||
-                        isSending ||
                         Boolean(driftResult)
                       }
                       onChange={(event) => setInput(event.target.value)}

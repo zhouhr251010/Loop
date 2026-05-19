@@ -17,7 +17,9 @@ from app.security import get_current_user
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
     branch_exists,
+    branch_window_filter,
     get_branch_anchor,
+    get_branch_read_windows,
     normalize_branch_id,
 )
 from app.services.feedback_service import reflect_and_merge_feedback
@@ -63,40 +65,23 @@ def _collect_plaza_events(
 ) -> list[models.EventLog]:
     """Return inherited global-world plaza events for one branch."""
     normalized_branch_id = normalize_branch_id(branch_id)
-    visited = set(visited_branches or set())
-    if normalized_branch_id in visited:
-        return []
-    visited.add(normalized_branch_id)
-
-    anchor = get_branch_anchor(db, normalized_branch_id)
-    inherited_events: list[models.EventLog] = []
-    lower_bound: datetime | None = None
-    if anchor is not None:
-        inherited_events = _collect_plaza_events(
-            db,
-            anchor.parent_branch_id,
-            event_type,
-            until=anchor.fork_timestamp,
-            visited_branches=visited,
-        )
-        lower_bound = anchor.fork_timestamp
+    read_windows = get_branch_read_windows(db, normalized_branch_id, until)
 
     filters = [
-        models.EventLog.branch_id == normalized_branch_id,
+        branch_window_filter(
+            models.EventLog.branch_id,
+            models.EventLog.timestamp,
+            models.EventLog.event_id,
+            read_windows,
+        ),
         models.EventLog.event_type == event_type,
     ]
-    if until is not None:
-        filters.append(models.EventLog.timestamp < until)
-    if lower_bound is not None:
-        filters.append(models.EventLog.timestamp >= lower_bound)
-
-    branch_events = (
+    return (
         db.query(models.EventLog)
         .filter(*filters)
         .order_by(models.EventLog.timestamp.asc(), models.EventLog.event_id.asc())
         .all()
     )
-    return [*inherited_events, *branch_events]
 
 
 def _latest_feedback_corrections(
@@ -233,8 +218,14 @@ def create_agent_post(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only create posts for your own agent.",
         )
+    branch_id = normalize_branch_id(post_in.branch_id)
+    if not branch_exists(db, branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
 
-    return _post_out(post_crud.create_post(db, agent_id, post_in), post_in.branch_id)
+    return _post_out(post_crud.create_post(db, agent_id, post_in), branch_id)
 
 
 @router.get("/api/posts", response_model=list[PostFeedOut])

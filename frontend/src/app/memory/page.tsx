@@ -32,11 +32,11 @@ const MEMORY_STATE_ENDPOINT = (branchId: string) =>
 const CLEAR_MEMORY_ENDPOINT = (branchId: string) =>
   `/api/agents/me/memory/clear?branch_id=${encodeURIComponent(branchId)}`;
 
-const RELATIONSHIPS_PREVIEW_ENDPOINT =
-  `/api/agents/me/relationships?limit=${RELATIONSHIP_PREVIEW_LIMIT}`;
+const RELATIONSHIPS_PREVIEW_ENDPOINT = (branchId: string) =>
+  `/api/agents/me/relationships?limit=${RELATIONSHIP_PREVIEW_LIMIT}&branch_id=${encodeURIComponent(branchId)}`;
 
-const FEED_PREVIEW_ENDPOINT =
-  `/api/agents/me/feed-preview?limit=${FEED_PREVIEW_LIMIT}`;
+const FEED_PREVIEW_ENDPOINT = (branchId: string) =>
+  `/api/agents/me/feed-preview?limit=${FEED_PREVIEW_LIMIT}&branch_id=${encodeURIComponent(branchId)}`;
 
 export default function MemoryPage() {
   const router = useRouter();
@@ -172,10 +172,10 @@ export default function MemoryPage() {
           MEMORY_STATE_ENDPOINT(normalizedBranchId),
         ),
         apiRequest<Relationship[]>(
-          RELATIONSHIPS_PREVIEW_ENDPOINT,
+          RELATIONSHIPS_PREVIEW_ENDPOINT(normalizedBranchId),
         ),
         apiRequest<PersonalizedPostPreview[]>(
-          FEED_PREVIEW_ENDPOINT,
+          FEED_PREVIEW_ENDPOINT(normalizedBranchId),
         ),
       ]);
       if (diagnosticsRequestIdRef.current !== requestId) {
@@ -211,7 +211,10 @@ export default function MemoryPage() {
         "/api/users/me/memory/upload",
         {
           method: "POST",
-          body: JSON.stringify({ content: content.trim() }),
+          body: JSON.stringify({
+            content: content.trim(),
+            branch_id: currentBranch,
+          }),
         },
       );
       setContent("");
@@ -239,6 +242,7 @@ export default function MemoryPage() {
           body: JSON.stringify({
             query: query.trim(),
             top_k: topK,
+            branch_id: currentBranch,
           }),
         },
       );
@@ -260,7 +264,7 @@ export default function MemoryPage() {
     setIsSleeping(true);
     try {
       const result = await apiRequest<MemoryConsolidationAcceptedResponse>(
-        "/api/agents/me/sleep",
+        `/api/agents/me/sleep?branch_id=${encodeURIComponent(currentBranch)}`,
         { method: "POST" },
       );
       setSleepResult(null);

@@ -229,6 +229,337 @@ def ensure_probe_response_branch_schema() -> None:
         )
 
 
+def ensure_chat_log_session_type_schema() -> None:
+    """Keep existing chat logs aligned with multi-party session typing."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS session_type VARCHAR(32)
+                NOT NULL DEFAULT 'Human_to_Agent'
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_session_type
+                ON chat_logs (session_type)
+                """,
+            ),
+        )
+
+
+def ensure_chat_log_human_peer_schema() -> None:
+    """Keep chat logs aligned with human-to-human sender/receiver metadata."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS sender_user_id INTEGER
+                REFERENCES users(id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS receiver_user_id INTEGER
+                REFERENCES users(id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_sender_user_id
+                ON chat_logs (sender_user_id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_receiver_user_id
+                ON chat_logs (receiver_user_id)
+                """,
+            ),
+        )
+
+
+def ensure_chat_log_memory_extraction_schema() -> None:
+    """Keep chat logs aligned with bypass memory watcher processing flags."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS is_memory_extracted BOOLEAN
+                NOT NULL DEFAULT TRUE
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE chat_logs
+                SET is_memory_extracted = TRUE
+                WHERE is_memory_extracted IS NULL
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ALTER COLUMN is_memory_extracted SET DEFAULT FALSE
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_is_memory_extracted
+                ON chat_logs (is_memory_extracted)
+                """,
+            ),
+        )
+
+
+def ensure_chat_log_read_schema() -> None:
+    """Keep human-to-human chat logs aligned with offline read tracking."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS is_read BOOLEAN
+                NOT NULL DEFAULT FALSE
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_is_read
+                ON chat_logs (is_read)
+                """,
+            ),
+        )
+
+
+def ensure_chat_log_group_schema() -> None:
+    """Keep existing chat logs aligned with N-to-N group room messages."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE chat_logs
+                ADD COLUMN IF NOT EXISTS group_id VARCHAR(36)
+                REFERENCES groups(id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_group_id
+                ON chat_logs (group_id)
+                """,
+            ),
+        )
+
+
+def ensure_group_owner_schema() -> None:
+    """Keep group rooms aligned with owner metadata."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE groups
+                ADD COLUMN IF NOT EXISTS owner_id INTEGER
+                REFERENCES users(id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_groups_owner_id
+                ON groups (owner_id)
+                """,
+            ),
+            )
+
+
+def ensure_group_summary_branch_schema() -> None:
+    """Keep rolling group summaries isolated by world-line branch."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                ALTER TABLE group_summaries
+                ADD COLUMN IF NOT EXISTS branch_id VARCHAR(128) NOT NULL DEFAULT 'main'
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE group_summaries
+                SET branch_id = 'main'
+                WHERE branch_id IS NULL OR btrim(branch_id) = ''
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_group_summaries_branch_id
+                ON group_summaries (branch_id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                DECLARE
+                    constraint_name TEXT;
+                BEGIN
+                    FOR constraint_name IN
+                        SELECT con.conname
+                        FROM pg_constraint con
+                        JOIN pg_class rel ON rel.oid = con.conrelid
+                        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                        WHERE rel.relname = 'group_summaries'
+                          AND nsp.nspname = current_schema()
+                          AND con.contype = 'u'
+                          AND pg_get_constraintdef(con.oid) = 'UNIQUE (group_id)'
+                    LOOP
+                        EXECUTE format(
+                            'ALTER TABLE group_summaries DROP CONSTRAINT %I',
+                            constraint_name
+                        );
+                    END LOOP;
+                END $$;
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint con
+                        JOIN pg_class rel ON rel.oid = con.conrelid
+                        JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                        WHERE rel.relname = 'group_summaries'
+                          AND nsp.nspname = current_schema()
+                          AND con.conname = 'uix_group_summary_branch'
+                    ) THEN
+                        ALTER TABLE group_summaries
+                        ADD CONSTRAINT uix_group_summary_branch
+                        UNIQUE (group_id, branch_id);
+                    END IF;
+                END $$;
+                """,
+            ),
+        )
+
+
+def ensure_social_chat_indexes_schema() -> None:
+    """Keep high-volume social chat reads on bounded composite indexes."""
+    if not IS_POSTGRES:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_h2h_thread_page
+                ON chat_logs (
+                    session_type,
+                    branch_id,
+                    sender_user_id,
+                    receiver_user_id,
+                    timestamp DESC,
+                    id DESC
+                )
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_h2h_unread
+                ON chat_logs (
+                    session_type,
+                    receiver_user_id,
+                    is_read,
+                    sender_user_id
+                )
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_chat_logs_group_page
+                ON chat_logs (
+                    session_type,
+                    group_id,
+                    branch_id,
+                    timestamp DESC,
+                    id DESC
+                )
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_group_members_user_lookup
+                ON group_members (entity_type, entity_id, group_id)
+                """,
+            ),
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS ix_group_members_group_lookup
+                ON group_members (group_id, entity_type)
+                """,
+            ),
+        )
+
+
 def ensure_user_admin_schema() -> None:
     """Keep existing user tables aligned with the configured admin account."""
     if not IS_POSTGRES:
@@ -330,6 +661,14 @@ def initialize_database() -> None:
                 Base.metadata.create_all(bind=engine)
                 ensure_agent_npc_schema()
                 ensure_probe_response_branch_schema()
+                ensure_chat_log_session_type_schema()
+                ensure_chat_log_human_peer_schema()
+                ensure_chat_log_memory_extraction_schema()
+                ensure_chat_log_read_schema()
+                ensure_chat_log_group_schema()
+                ensure_group_owner_schema()
+                ensure_group_summary_branch_schema()
+                ensure_social_chat_indexes_schema()
                 ensure_user_admin_schema()
                 ensure_postgres_extensions()
                 ensure_postgres_rag_schema()
@@ -345,6 +684,14 @@ def initialize_database() -> None:
     Base.metadata.create_all(bind=engine)
     ensure_agent_npc_schema()
     ensure_probe_response_branch_schema()
+    ensure_chat_log_session_type_schema()
+    ensure_chat_log_human_peer_schema()
+    ensure_chat_log_memory_extraction_schema()
+    ensure_chat_log_read_schema()
+    ensure_chat_log_group_schema()
+    ensure_group_owner_schema()
+    ensure_group_summary_branch_schema()
+    ensure_social_chat_indexes_schema()
     ensure_user_admin_schema()
     ensure_postgres_extensions()
     ensure_postgres_rag_schema()

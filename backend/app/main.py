@@ -21,11 +21,13 @@ from .routers import (
     counterfactuals,
     evaluations,
     export,
+    group,
     memory,
     posts,
     probes,
     simulate,
     simulation,
+    social,
     users,
 )
 from .security import (
@@ -128,7 +130,9 @@ app.include_router(counterfactuals.router)
 app.include_router(evaluations.router)
 app.include_router(simulate.router)
 app.include_router(simulation.router)
+app.include_router(social.router)
 app.include_router(chat.router)
+app.include_router(group.router)
 app.include_router(memory.router)
 app.include_router(export.router)
 app.include_router(users.router)

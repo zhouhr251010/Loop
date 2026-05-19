@@ -670,6 +670,7 @@ async def invoke_agent_graph(
     energy: int | None = None,
     summary: str | None = None,
     core_memory: dict[str, str] | None = None,
+    branch_id: str = "main",
 ) -> BaseMessage:
     """Run the compiled graph with user-scoped tool context."""
     graph_input: dict[str, object] = {"incoming_messages": list(messages)}
@@ -688,7 +689,8 @@ async def invoke_agent_graph(
     if core_memory is not None:
         graph_input["core_memory"] = core_memory
 
-    token = set_tool_user_context(user_id, agent_id)
+    normalized_branch_id = (branch_id or "main").strip() or "main"
+    token = set_tool_user_context(user_id, agent_id, normalized_branch_id)
     try:
         result = await agent_graph.ainvoke(
             graph_input,
@@ -696,6 +698,7 @@ async def invoke_agent_graph(
                 "configurable": {
                     "user_id": user_id,
                     "agent_id": agent_id,
+                    "branch_id": normalized_branch_id,
                     "thread_id": thread_id,
                 },
             },

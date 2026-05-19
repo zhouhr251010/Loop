@@ -9,11 +9,27 @@ from app.crud import agent as agent_crud
 from app.database import get_db
 from app import models
 from app.schemas.agent import AgentDeletionOut
-from app.security import get_current_user
+from app.security import get_current_user, require_admin
 from app.services.agent_cleanup_service import delete_agent_and_traces
 
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
+
+
+@router.get("/directory", response_model=list[dict[str, str]])
+def list_agents_directory(
+    db: Session = Depends(get_db),
+    _admin: models.User = Depends(require_admin),
+) -> list[dict[str, str]]:
+    """Return a lightweight directory of all Agents for admin simulations."""
+    agents = agent_crud.get_agents(db)
+    return [
+        {
+            "agent_id": str(agent.id),
+            "name": agent.agent_name,
+        }
+        for agent in agents
+    ]
 
 
 @router.delete("/{agent_id}", response_model=AgentDeletionOut)

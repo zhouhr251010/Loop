@@ -9,6 +9,7 @@ class MemoryUploadCreate(BaseModel):
     """Incoming long-form memory content from a user."""
 
     content: str = Field(..., min_length=1, max_length=50000)
+    branch_id: str = Field("main", min_length=1, max_length=128)
 
 
 class MemoryUploadOut(BaseModel):
@@ -23,6 +24,7 @@ class MemorySearchCreate(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=2000)
     top_k: int = Field(default=3, ge=1, le=10)
+    branch_id: str = Field("main", min_length=1, max_length=128)
 
 
 class MemorySearchOut(BaseModel):

@@ -61,6 +61,7 @@ def create_agent(db: Session, agent_in: AgentCreate) -> models.Agent:
     db_agent = models.Agent(**agent_in.model_dump())
     db.add(db_agent)
     db.flush()
+    db_user = db.get(models.User, db_agent.user_id)
     append_event(
         db,
         agent_id=db_agent.id,
@@ -70,6 +71,7 @@ def create_agent(db: Session, agent_in: AgentCreate) -> models.Agent:
             "agent_name": db_agent.agent_name,
             "system_prompt_base": db_agent.system_prompt_base,
             "is_npc": db_agent.is_npc,
+            "core_memory": db_user.core_memory if db_user is not None else None,
         },
         timestamp=timestamp,
         commit=False,

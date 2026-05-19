@@ -1,6 +1,6 @@
 """RESTful user endpoints for registration and questionnaire submission."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app import models
@@ -26,10 +26,85 @@ from app.security import (
     require_admin,
     require_same_user,
 )
+from app.services.branching import branch_exists, normalize_branch_id
+from app.services.core_memory_service import normalize_core_memory
+from app.services.event_store import append_event
 from app.services.npc_seed import ensure_npc_agent_for_sender
+from app.services.scoring_service import (
+    merge_questionnaire_scores_into_core_memory,
+    score_questionnaire_payload,
+)
+from app.services.time_machine import TimeMachine
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
+
+
+def _submit_questionnaire_for_branch(
+    db: Session,
+    db_user: models.User,
+    questionnaire_in: QuestionnaireCreate,
+    branch_id: str,
+) -> QuestionnaireSubmissionOut:
+    """Persist questionnaire data to main, or append a branch-local profile update."""
+    normalized_branch_id = normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
+
+    if normalized_branch_id == "main":
+        updated_user = user_crud.update_user_questionnaire(
+            db,
+            db_user,
+            questionnaire_in,
+        )
+        db_agent = agent_crud.create_or_update_agent_for_user(db, updated_user)
+        return QuestionnaireSubmissionOut(user=updated_user, agent=db_agent)
+
+    db_agent = agent_crud.get_agent_by_user_id(db, db_user.id)
+    if db_agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found for this user.",
+        )
+
+    big_five_scores, schwartz_values = score_questionnaire_payload(
+        questionnaire_in.big_five_scores,
+        questionnaire_in.schwartz_values,
+    )
+    reconstructed_state = TimeMachine(db).reconstruct_state(
+        agent_id=db_agent.id,
+        target_timestamp=models.utc_now_seconds(),
+        branch_id=normalized_branch_id,
+    )
+    base_core_memory = normalize_core_memory(reconstructed_state.get("core_memory"))
+    branch_core_memory = merge_questionnaire_scores_into_core_memory(
+        base_core_memory,
+        questionnaire_in.mbti_type,
+        big_five_scores,
+        schwartz_values,
+    )
+    append_event(
+        db,
+        agent_id=db_agent.id,
+        branch_id=normalized_branch_id,
+        event_type="CORE_MEMORY_UPDATED",
+        payload={
+            "source": "questionnaire_branch_submission",
+            "core_memory": branch_core_memory,
+            "mbti_type": questionnaire_in.mbti_type,
+            "big_five_scores": big_five_scores,
+            "schwartz_values": schwartz_values,
+            "autobiography": questionnaire_in.autobiography,
+        },
+        commit=False,
+    )
+    db.commit()
+    db.refresh(db_user)
+    db.refresh(db_agent)
+    return QuestionnaireSubmissionOut(user=db_user, agent=db_agent)
 
 
 @router.post(
@@ -84,6 +159,27 @@ def login_user(user_in: UserLogin, db: Session = Depends(get_db)) -> AuthSession
 def get_me(current_user=Depends(get_current_user)) -> UserOut:
     """Return the authenticated user for client-side session checks."""
     return current_user
+
+
+@router.get("/directory", response_model=list[dict[str, str]])
+def list_users_directory(
+    db: Session = Depends(get_db),
+    _current_user: models.User = Depends(get_current_user),
+) -> list[dict[str, str]]:
+    """Return a lightweight directory of non-admin participants."""
+    users = (
+        db.query(models.User)
+        .filter(models.User.is_admin.is_(False))
+        .order_by(models.User.username.asc())
+        .all()
+    )
+    return [
+        {
+            "user_id": str(user.id),
+            "username": user.username,
+        }
+        for user in users
+    ]
 
 
 @router.get("/agent-choices", response_model=list[AgentSessionChoiceOut])
@@ -158,17 +254,17 @@ def create_npc_agents_from_senders(
 )
 def submit_my_questionnaire(
     questionnaire_in: QuestionnaireCreate,
+    branch_id: str = Query("main"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ) -> QuestionnaireSubmissionOut:
     """Save questionnaire data for the authenticated user."""
-    updated_user = user_crud.update_user_questionnaire(
+    return _submit_questionnaire_for_branch(
         db,
         current_user,
         questionnaire_in,
+        branch_id,
     )
-    db_agent = agent_crud.create_or_update_agent_for_user(db, updated_user)
-    return QuestionnaireSubmissionOut(user=updated_user, agent=db_agent)
 
 
 @router.post(
@@ -179,6 +275,7 @@ def submit_my_questionnaire(
 def submit_questionnaire(
     user_id: int,
     questionnaire_in: QuestionnaireCreate,
+    branch_id: str = Query("main"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ) -> QuestionnaireSubmissionOut:
@@ -191,9 +288,12 @@ def submit_questionnaire(
             detail="User not found.",
         )
 
-    updated_user = user_crud.update_user_questionnaire(db, db_user, questionnaire_in)
-    db_agent = agent_crud.create_or_update_agent_for_user(db, updated_user)
-    return QuestionnaireSubmissionOut(user=updated_user, agent=db_agent)
+    return _submit_questionnaire_for_branch(
+        db,
+        db_user,
+        questionnaire_in,
+        branch_id,
+    )
 
 
 @router.get("/me/agent", response_model=AgentOut)

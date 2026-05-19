@@ -14,6 +14,7 @@ from app.services.branching import normalize_branch_id
 from app.services.core_memory_service import normalize_core_memory
 from app.services.event_store import append_event
 from app.services.llm_service import build_async_deepseek_client
+from app.services.time_machine import TimeMachine
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -136,7 +137,15 @@ def append_feedback_rule_to_core_memory(
     if user is None:
         raise ValueError("User not found.")
 
-    core_memory = normalize_core_memory(user.core_memory)
+    if normalized_branch_id == "main":
+        core_memory = normalize_core_memory(user.core_memory)
+    else:
+        reconstructed_state = TimeMachine(db).reconstruct_state(
+            agent_id=agent_id,
+            target_timestamp=utc_now_seconds(),
+            branch_id=normalized_branch_id,
+        )
+        core_memory = normalize_core_memory(reconstructed_state.get("core_memory"))
     existing_style = core_memory.get("communication_style", "").strip()
     new_rule_line = f"- {clean_rule}"
     if clean_rule in existing_style:
@@ -151,7 +160,8 @@ def append_feedback_rule_to_core_memory(
         "communication_style": updated_style,
     }
     timestamp = utc_now_seconds()
-    user.core_memory = core_memory
+    if normalized_branch_id == "main":
+        user.core_memory = core_memory
     append_event(
         db,
         agent_id=agent_id,

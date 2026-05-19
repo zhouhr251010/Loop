@@ -6,7 +6,7 @@ import logging
 import re
 from collections import OrderedDict
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 from app import models
 from app.services.branching import (
     DEFAULT_BRANCH_ID,
-    branch_scope_ids,
-    get_branch_anchor,
+    branch_window_filter,
+    get_branch_read_windows,
     normalize_branch_id,
 )
 from app.services.core_memory_service import DEFAULT_CORE_MEMORY, normalize_core_memory
@@ -87,11 +87,19 @@ class TimeMachine:
         visited_branches.add(normalized_branch)
 
         state = self._initial_state(agent_id, target_timestamp, normalized_branch)
-        readable_branches = branch_scope_ids(normalized_branch)
+        read_windows = get_branch_read_windows(
+            self.db,
+            normalized_branch,
+            target_timestamp,
+        )
         filters = [
             models.EventLog.agent_id == agent_id,
-            models.EventLog.branch_id.in_(readable_branches),
-            models.EventLog.timestamp <= target_timestamp,
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
         ]
         events = (
             self.db.query(models.EventLog)
@@ -103,8 +111,15 @@ class TimeMachine:
             )
             .all()
         )
+        branch_rank = {
+            window.branch_id: index
+            for index, window in enumerate(read_windows)
+        }
         if normalized_branch != DEFAULT_BRANCH_ID:
-            events = sorted(events, key=self._event_replay_sort_key)
+            events = sorted(
+                events,
+                key=lambda event: self._event_replay_sort_key(event, branch_rank),
+            )
         for event in events:
             self._apply_event(state, event)
 
@@ -141,9 +156,17 @@ class TimeMachine:
         latest_event_id = int(latest_event[0]) if latest_event else 0
         return (agent_id, branch_id, latest_event_id)
 
-    def _event_replay_sort_key(self, event: models.EventLog) -> tuple[datetime, int, int]:
-        branch_rank = 0 if normalize_branch_id(event.branch_id) == DEFAULT_BRANCH_ID else 1
-        return (event.timestamp, branch_rank, int(event.event_id or 0))
+    def _event_replay_sort_key(
+        self,
+        event: models.EventLog,
+        branch_rank: dict[str, int],
+    ) -> tuple[datetime, int, int]:
+        normalized_branch_id = normalize_branch_id(event.branch_id)
+        return (
+            event.timestamp,
+            branch_rank.get(normalized_branch_id, len(branch_rank)),
+            int(event.event_id or 0),
+        )
 
     def _coerce_timestamp(self, value: datetime) -> datetime:
         if value.tzinfo is not None:
@@ -158,7 +181,12 @@ class TimeMachine:
     ) -> dict[str, Any]:
         core_memory = DEFAULT_CORE_MEMORY.copy()
         agent = self.db.get(models.Agent, agent_id)
-        if agent is not None and agent.user is not None:
+        if (
+            branch_id == DEFAULT_BRANCH_ID
+            and target_timestamp >= models.utc_now_seconds() - timedelta(seconds=1)
+            and agent is not None
+            and agent.user is not None
+        ):
             core_memory = normalize_core_memory(agent.user.core_memory)
 
         return {
@@ -170,6 +198,7 @@ class TimeMachine:
             "current_core_memory": "",
             "working_memory": {},
             "intimacy": {},
+            "reflections": [],
             "replayed_events": 0,
         }
 
@@ -195,6 +224,8 @@ class TimeMachine:
             self._ignore_message_history_for_prompt_state()
         elif event_type == "RELATIONSHIP_CHANGED":
             self._apply_relationship_changed(state, effective_payload)
+        elif event_type == "REFLECTION_CREATED":
+            self._apply_reflection_created(state, effective_payload)
         elif event_type == "WORKING_MEMORY_CLEARED":
             state["working_memory"] = {}
 
@@ -224,6 +255,8 @@ class TimeMachine:
                 for key, value in base_state["intimacy"].items()
                 if isinstance(value, (int, float))
             }
+        if isinstance(base_state.get("reflections"), list):
+            state["reflections"] = base_state["reflections"]
 
     def _load_base_state_from_reconstruction(
         self,
@@ -243,6 +276,8 @@ class TimeMachine:
             }
         if isinstance(base_state.get("working_memory"), dict):
             state["working_memory"] = base_state["working_memory"]
+        if isinstance(base_state.get("reflections"), list):
+            state["reflections"] = base_state["reflections"]
 
     def _apply_core_memory_update(
         self,
@@ -320,6 +355,28 @@ class TimeMachine:
                 payload["affinity_change"],
             )
 
+    def _apply_reflection_created(
+        self,
+        state: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        content = str(payload.get("content") or "").strip()
+        level = str(payload.get("level") or "").strip()
+        if not content or not level:
+            return
+        reflections = state.setdefault("reflections", [])
+        if not isinstance(reflections, list):
+            reflections = []
+            state["reflections"] = reflections
+        reflections.append(
+            {
+                "level": level,
+                "content": content,
+                "source": str(payload.get("source") or ""),
+                "reflection_id": str(payload.get("reflection_id") or ""),
+            },
+        )
+
     def _merge_state_patch(
         self,
         state: dict[str, Any],
@@ -333,6 +390,8 @@ class TimeMachine:
                 for key, value in state_patch["intimacy"].items()
                 if isinstance(value, (int, float))
             }
+        if isinstance(state_patch.get("reflections"), list):
+            state["reflections"] = state_patch["reflections"]
 
     def _format_current_core_memory(self, state: dict[str, Any]) -> str:
         core_memory = normalize_core_memory(state.get("core_memory"))

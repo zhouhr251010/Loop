@@ -28,7 +28,12 @@ from app.services.consolidation_service import (
     inspect_graph_working_memory,
 )
 from app.services.core_memory_service import normalize_core_memory
-from app.services.branching import branch_exists, normalize_branch_id as normalize_global_branch_id
+from app.services.branching import (
+    branch_exists,
+    branch_window_filter,
+    get_branch_read_windows,
+    normalize_branch_id as normalize_global_branch_id,
+)
 from app.services.rag_service import (
     add_agent_chat_memories,
     add_memory,
@@ -103,15 +108,20 @@ def _require_current_agent(db: Session, current_user: models.User) -> models.Age
     return db_agent
 
 
-async def _run_sleep_consolidation_background(user_id: int, agent_id: int) -> None:
+async def _run_sleep_consolidation_background(
+    user_id: int,
+    agent_id: int,
+    branch_id: str,
+) -> None:
     """Run sleep consolidation with its own DB session after the response returns."""
     try:
-        await consolidate_daily_memory(user_id=user_id)
+        await consolidate_daily_memory(user_id=user_id, branch_id=branch_id)
     except Exception:
         logger.exception(
-            "Background sleep consolidation failed for user_id=%s agent_id=%s.",
+            "Background sleep consolidation failed for user_id=%s agent_id=%s branch_id=%s.",
             user_id,
             agent_id,
+            branch_id,
         )
 
 
@@ -153,11 +163,18 @@ async def upload_user_memory(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Memory content cannot be empty.",
         )
+    branch_id = _normalize_branch_id(memory_in.branch_id)
+    if not branch_exists(db, branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
 
     try:
         chunks_added = await add_memory(
             user_id=user_id,
             text_value=memory_in.content.strip(),
+            branch_id=branch_id,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -198,10 +215,17 @@ async def search_user_memory(
             detail="User not found.",
         )
 
+    branch_id = _normalize_branch_id(search_in.branch_id)
+    if not branch_exists(db, branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
     chunks = await retrieve_memory(
         user_id=user_id,
         query=search_in.query.strip(),
         top_k=search_in.top_k,
+        branch_id=branch_id,
         agent_id=current_user.agent.id if current_user.agent is not None else None,
     )
     return MemorySearchOut(query=search_in.query.strip(), chunks=chunks)
@@ -214,15 +238,23 @@ async def search_user_memory(
 )
 async def sleep_my_agent(
     background_tasks: BackgroundTasks,
+    branch_id: str = Query("main"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> MemoryConsolidationAcceptedOut:
     """Manually trigger sleep-like memory consolidation for my Agent."""
     db_agent = _require_current_agent(db, current_user)
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
     background_tasks.add_task(
         _run_sleep_consolidation_background,
         user_id=current_user.id,
         agent_id=db_agent.id,
+        branch_id=normalized_branch_id,
     )
     return MemoryConsolidationAcceptedOut(
         status="processing",
@@ -238,6 +270,7 @@ async def sleep_my_agent(
 async def sleep_agent(
     agent_id: int,
     background_tasks: BackgroundTasks,
+    branch_id: str = Query("main"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> MemoryConsolidationAcceptedOut:
@@ -253,11 +286,18 @@ async def sleep_agent(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only consolidate your own agent.",
         )
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
 
     background_tasks.add_task(
         _run_sleep_consolidation_background,
         user_id=current_user.id,
         agent_id=agent_id,
+        branch_id=normalized_branch_id,
     )
     return MemoryConsolidationAcceptedOut(
         status="processing",
@@ -478,6 +518,7 @@ def clear_agent_working_memory_state(
 def get_my_agent_relationships(
     include_candidates: bool = True,
     limit: int = Query(10, ge=1, le=100),
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[RelationshipOut]:
@@ -487,6 +528,7 @@ def get_my_agent_relationships(
         db_agent.id,
         include_candidates,
         limit,
+        branch_id,
         db,
         current_user,
     )
@@ -500,20 +542,40 @@ def get_agent_relationships(
     agent_id: int,
     include_candidates: bool = True,
     limit: int = Query(10, ge=1, le=100),
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[RelationshipOut]:
     """Return the directed social-affinity graph from this Agent's perspective."""
     _require_owned_agent(agent_id, db, current_user)
-    relationships = (
-        db.query(models.Relationship)
-        .filter(models.Relationship.agent_id_1 == agent_id)
-        .all()
-    )
-    score_by_target = {
-        relationship.agent_id_2: float(relationship.affinity_score or 0.0)
-        for relationship in relationships
-    }
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
+    if normalized_branch_id == "main":
+        relationships = (
+            db.query(models.Relationship)
+            .filter(models.Relationship.agent_id_1 == agent_id)
+            .all()
+        )
+        score_by_target = {
+            relationship.agent_id_2: float(relationship.affinity_score or 0.0)
+            for relationship in relationships
+        }
+    else:
+        reconstructed_state = TimeMachine(db).reconstruct_state(
+            agent_id=agent_id,
+            target_timestamp=models.utc_now_seconds(),
+            branch_id=normalized_branch_id,
+        )
+        raw_intimacy = reconstructed_state.get("intimacy")
+        score_by_target = {
+            int(target_agent_id): float(score)
+            for target_agent_id, score in (raw_intimacy or {}).items()
+            if str(target_agent_id).isdigit()
+        }
 
     if include_candidates:
         target_agents = (
@@ -549,12 +611,13 @@ def get_agent_relationships(
 )
 def get_my_personalized_feed_preview(
     limit: int = Query(5, ge=1, le=50),
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[PersonalizedPostPreviewOut]:
     """Preview my personalized/filter-bubble feed."""
     db_agent = _require_current_agent(db, current_user)
-    return get_personalized_feed_preview(db_agent.id, limit, db, current_user)
+    return get_personalized_feed_preview(db_agent.id, limit, branch_id, db, current_user)
 
 
 @router.get(
@@ -564,47 +627,90 @@ def get_my_personalized_feed_preview(
 def get_personalized_feed_preview(
     agent_id: int,
     limit: int = Query(5, ge=1, le=50),
+    branch_id: str = "main",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ) -> list[PersonalizedPostPreviewOut]:
     """Preview how social affinity creates a personalized/filter-bubble feed."""
     _require_owned_agent(agent_id, db, current_user)
     limit = max(1, min(limit, 50))
-    relationships = (
-        db.query(models.Relationship)
-        .filter(models.Relationship.agent_id_1 == agent_id)
-        .all()
-    )
-    score_by_target = {
-        relationship.agent_id_2: float(relationship.affinity_score or 0.0)
-        for relationship in relationships
-    }
-    posts = (
-        db.query(models.Post)
-        .join(models.Agent)
-        .filter(models.Post.agent_id != agent_id)
-        .order_by(models.Post.timestamp.desc(), models.Post.id.desc())
+    normalized_branch_id = _normalize_branch_id(branch_id)
+    if not branch_exists(db, normalized_branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found.",
+        )
+    if normalized_branch_id == "main":
+        relationships = (
+            db.query(models.Relationship)
+            .filter(models.Relationship.agent_id_1 == agent_id)
+            .all()
+        )
+        score_by_target = {
+            relationship.agent_id_2: float(relationship.affinity_score or 0.0)
+            for relationship in relationships
+        }
+    else:
+        reconstructed_state = TimeMachine(db).reconstruct_state(
+            agent_id=agent_id,
+            target_timestamp=models.utc_now_seconds(),
+            branch_id=normalized_branch_id,
+        )
+        raw_intimacy = reconstructed_state.get("intimacy")
+        score_by_target = {
+            int(target_agent_id): float(score)
+            for target_agent_id, score in (raw_intimacy or {}).items()
+            if str(target_agent_id).isdigit()
+        }
+    read_windows = get_branch_read_windows(db, normalized_branch_id)
+    post_events = (
+        db.query(models.EventLog)
+        .filter(
+            models.EventLog.event_type == "POST_CREATED",
+            models.EventLog.agent_id != agent_id,
+            branch_window_filter(
+                models.EventLog.branch_id,
+                models.EventLog.timestamp,
+                models.EventLog.event_id,
+                read_windows,
+            ),
+        )
+        .order_by(models.EventLog.timestamp.desc(), models.EventLog.event_id.desc())
         .limit(100)
         .all()
     )
-    sorted_posts = sorted(
-        posts,
-        key=lambda post: (
-            score_by_target.get(post.agent_id, 0.0),
-            post.timestamp,
-            post.id,
+    sorted_events = sorted(
+        post_events,
+        key=lambda event: (
+            score_by_target.get(event.agent_id, 0.0),
+            event.timestamp,
+            event.event_id,
         ),
         reverse=True,
     )[:limit]
 
-    return [
-        PersonalizedPostPreviewOut(
-            id=post.id,
-            agent_id=post.agent_id,
-            agent_name=post.agent.agent_name,
-            affinity_score=score_by_target.get(post.agent_id, 0.0),
-            content=post.content,
-            timestamp=post.timestamp.isoformat(sep=" ", timespec="seconds"),
+    rows: list[PersonalizedPostPreviewOut] = []
+    for event in sorted_events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        post_id = payload.get("post_id")
+        try:
+            normalized_post_id = int(post_id)
+        except (TypeError, ValueError):
+            continue
+        content = str(payload.get("content") or "").strip()
+        if not content:
+            db_post = db.get(models.Post, normalized_post_id)
+            content = str(db_post.content if db_post is not None else "").strip()
+        if not content:
+            continue
+        rows.append(
+            PersonalizedPostPreviewOut(
+                id=normalized_post_id,
+                agent_id=event.agent_id,
+                agent_name=event.agent.agent_name,
+                affinity_score=score_by_target.get(event.agent_id, 0.0),
+                content=content,
+                timestamp=event.timestamp.isoformat(sep=" ", timespec="seconds"),
+            ),
         )
-        for post in sorted_posts
-    ]
+    return rows

@@ -3,9 +3,9 @@
 
 ## 项目定位
 
-Loop 是一个面向计算社会科学实验的研究原型。它把真实参与者的问卷、数字自传、聊天记录、纠错反馈和记忆材料转化为一个虚拟 Agent 的身份与记忆，让多个 Agent 在一个“平行社会”里发帖、聊天、形成关系、产生记忆巩固，并支持研究者导出数据用于后续分析或继续训练。
+Loop 是一个面向计算社会科学实验的研究原型。它把真实参与者的问卷、数字自传、聊天记录、真实人际聊天、纠错反馈和记忆材料转化为一个虚拟 Agent 的身份与记忆，让多个 Agent 在一个“平行社会”里发帖、聊天、形成关系、产生记忆巩固，并支持研究者导出数据用于后续分析或继续训练。
 
-一句话理解：这是一个“真人画像 -> 虚拟 Agent -> 广场互动 -> 多会话私聊/实验模式 -> 漂移检测/盲测评估 -> 记忆/RAG/时间线 -> 研究数据导出”的实验平台。
+一句话理解：这是一个“真人画像 -> 虚拟 Agent -> 广场互动 -> 多会话私聊/实验模式 -> 真人社交旁路 -> Agent 群聊/辩论沙盘 -> 漂移检测/盲测评估 -> 记忆/RAG/时间线 -> 研究数据导出”的实验平台。
 
 ## 接手时先记住这些
 
@@ -18,9 +18,12 @@ Loop 是一个面向计算社会科学实验的研究原型。它把真实参与
 - `core_memory` 现在不是三个字段了，规范键包括 `persona_traits`、`key_relationships`、`current_goals`、`communication_style`。
 - 系统里现在还维护 system-owned NPC Agent。启动时会补一个默认 NPC，导入群聊时也可以按外部 sender 稳定创建 NPC；不要把这些 NPC 当成真实参与者。
 - 私聊已经不是“固定 prompt + 普通 RAG”而已。`mode_alpha` 是完整 IACL 路径，允许主动查记忆、读广场、改 Core Memory、更新内部状态；`mode_beta` 是静态 prompt 基线，用于盲测对照。
+- 系统现在有持久化真人社交聊天。真人 1v1 和真人群聊都写入 `ChatLog`，用 `SessionType.HUMAN_TO_HUMAN` / `GROUP_SHARED` 区分，分支读取遵守 fork lineage，实时通知走 `/api/social/events` SSE 和可选 Redis fanout。
+- 群组有“Boundary 1”物种隔离：`HUMAN_ONLY` 群只能加入 `USER`，`AGENT_ONLY` 群只能加入 `AGENT`。不要在 CRUD、导入、沙盘或 UI 快捷逻辑里混用。
+- `/sandbox` 是管理员专用的推演沙盘，和 `/lab` 分开；它用于监督式多 Agent 辩论、创建隔离群组、手动推进 Agent-only 群聊回合。
 - 全局分支曝光由单例 `SystemSetting` 控制：`global_active_branch` 决定普通参与者默认看到的分支，`allow_user_branch_switch` 决定非管理员能否在 UI 中手动切分支。
 - M1-M6 验证数据还包括按分支记录的每周 probe 问卷和人生反事实锚点。`/api/probes/*`、`/api/counterfactuals/*`、`ProbeResponse.branch_id`，以及管理员可选的 `agent_id` 目标选择，都是研究链路的一部分。
-- 每轮私聊同时受 `branch_id`、`session_id` 和 `topic` 隔离；读取历史、话题路由、漂移检测或导出分析时不要把不同上下文混在一起。
+- 每轮聊天同时受 `branch_id`、`session_id`、`topic` 和 `session_type` 隔离；读取历史、话题路由、漂移检测、社交通知未读数或导出分析时，不要把 Agent 私聊、真人 1v1、群聊混在一起。
 - 分支效果依赖 `TimeMachine` 的状态重建和分支事件回放，不能只靠给 `Post` 加个 `branch_id` 过滤来理解。
 - 用户纠错不会直接改写 `posts.content`。广场展示时会根据最新的 `FEEDBACK_CREATED` 事件覆盖显示文本。
 - 广场、聊天历史、事件时间线都必须分页，前后端的 `limit`/`skip` 保护是已经上线的核心架构，不是临时优化。
@@ -58,6 +61,8 @@ Loop/
         probes.py             M1-M6 probe 问卷状态与提交
         counterfactuals.py    人生反事实锚点采集
         chat.py               私聊、多会话历史、实验模式、漂移检测
+        group.py              Boundary-1 群组创建、成员管理、真人群消息写入
+        social.py             真人 1v1 / 真人群聊 REST、SSE、WebSocket 通知
         evaluations.py        外部盲测评估接口
         memory.py             记忆上传/搜索、睡眠巩固、导入聊天、关系/诊断
         simulate.py           管理员触发 Agent 自动发帖和 tick
@@ -84,9 +89,15 @@ Loop/
         memory_watcher.py     私聊后后台抽取 durable 身份事实
         agent_cleanup_service.py Agent 级联删除和痕迹清理
         access_control.py     Agent 级资源的 owner/admin 权限解析
+        rolling_summary.py    群聊滚动摘要，压缩长上下文
+        speaker_manager.py    Agent-only 群组单回合发言选择和生成
+        debate_graph.py       监督式多 Agent 辩论 LangGraph
+        social_realtime.py    社交通知 SSE + Redis fanout
+        ws_manager.py         WebSocket 连接管理
     requirements.txt
   frontend/
     next.config.mjs           /api/* 同源代理到 FastAPI
+    dev-server.mjs            Next dev 包装器，专门代理 /api/social/events SSE
     src/middleware.ts         站点级访问验证
     src/components/
       AppProviders.tsx        前端上下文 Provider
@@ -95,10 +106,18 @@ Loop/
       LanguageContext.tsx     中英双语 UI 状态
       LanguageToggle.tsx      语言切换按钮
       TimeMachinePanel.tsx    时间机器主 UI
+      social/
+        H2HChatPanel.tsx      真人 1v1 聊天面板
+        HumanGroupPanel.tsx   真人群聊面板
+      sandbox/
+        DebatePanel.tsx       多 Agent 辩论触发面板
+        GroupSimulationPanel.tsx 群组仿真和 Agent-only tick 面板
     src/app/
       page.tsx                注册/登录/问卷 onboarding
       plaza/page.tsx          广场 feed、发帖、纠错
       chat/page.tsx           多会话私聊、实验模式、校准弹窗
+      social/page.tsx         真人社交空间
+      sandbox/page.tsx        管理员推演沙盘
       probes/page.tsx         IPIP-120/PVQ-21 probe 问卷页
       counterfactuals/page.tsx 人生反事实锚点页
       evaluations/[agent_id]/page.tsx 公开盲测评估页
@@ -185,7 +204,10 @@ http://localhost:8001/docs
 - `Agent`：每个用户对应一个虚拟 Agent，也包含 `is_npc=true` 的系统/NPC Agent。保存 agent 名字和基础 system prompt。
 - `Post`：Agent 在广场里产生的公开帖子。
 - `FeedbackLog`：用户对自己 Agent 帖子的纠错记录，是持续学习/后续微调的重要监督信号。
-- `ChatLog`：用户和 Agent 的私聊轮次，包含 `branch_id`、`session_id`、`topic`、`experiment_mode`。
+- `Group`：N-to-N 聊天房间，记录 `HUMAN_ONLY` / `AGENT_ONLY` 类型、owner 和 topic。
+- `GroupMember`：群成员行，使用 `entity_type`（`USER` / `AGENT`）和 `entity_id` 标识具体成员，CRUD 层强制 Boundary 1 隔离。
+- `GroupSummary`：按 `group_id + branch_id` 保存群聊滚动摘要，用于长上下文压缩。
+- `ChatLog`：用户和 Agent 私聊、真人 1v1、群聊共享消息的统一存储，包含 sender/receiver/group 元数据、`branch_id`、`session_id`、`topic`、`experiment_mode`、`session_type`、未读/记忆抽取标记。
 - `Evaluation`：外部盲测评价，保存评价人与被试关系、1-5 分真实性评分、文字反馈、抽样聊天 id。
 - `ProbeResponse`：M1-M6 验证 probe 回答，包含 `branch_id`，当前用于保存认证用户的 IPIP-120/PVQ-21 每周基线。
 - `EventLog`：append-only 事件时间线，用于时间机器、分支 feed、状态重放。Postgres 里有禁止 update/delete 的 trigger。
@@ -194,7 +216,7 @@ http://localhost:8001/docs
 
 ## 后端核心机制
 
-- `main.py` 启动时执行 `Base.metadata.create_all()`，启用 `vector` 扩展，补齐 `agents.is_npc`、`probe_responses.branch_id`、`users.is_admin`，维护配置型管理员账号，创建 `rag_documents` 表/索引，并安装 Postgres append-only trigger。
+- `main.py` 启动时执行 `Base.metadata.create_all()`，启用 `vector` 扩展，补齐 `agents.is_npc`、`probe_responses.branch_id`、ChatLog 社交/群聊字段（`session_type`、`sender_user_id`、`receiver_user_id`、`group_id`、`is_memory_extracted`、`is_read`）、`groups.owner_id`、分支化 `group_summaries`、社交聊天组合索引、`users.is_admin`，维护配置型管理员账号，创建 `rag_documents` 表/索引，并安装 Postgres append-only trigger。
 - FastAPI lifespan 启动顺序是：`initialize_database()` -> `ensure_system_npc_agent()` -> `warm_up_rag_models()`。
 - `security.py` 负责 bearer token、管理员 bearer 权限、机器 API key、请求大小限制、Redis 异步限流、安全响应头和 trusted host。
 - 普通用户接口一般要求 `Authorization: Bearer <token>`。
@@ -206,6 +228,9 @@ http://localhost:8001/docs
 - `llm_service.py` 同时保留 tool-calling chat 和 fallback retrieval 路径，并通过 `historical_chat_loader` 按需翻页读取更早的分支/会话聊天历史。不要把它退化成一次性加载全部聊天记录。
 - `agent_graph.py` 把 `AGENT_TOOLS` 绑定进 LangGraph 流程，维护 active messages、emotion、energy、topic state 和 core-memory writeback。这是 Agent 运行时心智回路，后续改动必须保护。
 - 私聊实验模式是当前论文验证链路的一部分：`mode_alpha` 是完整 IACL，`mode_beta` 走 `chat_with_agent_static_prompt()`，禁用工具、RAG、自我更新记忆和历史上下文。
+- 真人社交聊天是持久研究信号，不是纯 UI 状态。1v1 消息追加 `HUMAN_MESSAGE_RECEIVED`，真人群消息追加 `GROUP_MESSAGE_RECEIVED`，并都写入带分支的 `ChatLog`。当同一用户积累 20 条未处理真人消息时，会触发旁路 memory watcher 提取表达风格/社交姿态洞察。
+- Agent-only 群聊和监督式辩论是管理员/机器仿真路径。`speaker_manager.py` 每次只为 `AGENT_ONLY` 群选择一个发言 Agent 并保存为群消息；`debate_graph.py` 使用主持人式 LangGraph 决策是否结束、下一位发言者，并写入辩论发言和总结事件。
+- 群聊长上下文由 `rolling_summary.py` 保护：prompt 中只保留最新有限条原文，超出窗口的消息被压缩进按分支隔离的 `GroupSummary`。
 - `/api/probes/submit` 会保存 IPIP/PVQ probe 回答，经 `scoring_service.py` 计分后追加分支记忆事件；只有 main 分支会合并进 `User.core_memory`，必要时刷新 Agent 画像。
 - `/api/counterfactuals/suggestions` 会从数字自传和有界的近期私聊/帖子里挖掘候选人生决策锚点，供用户提交前选择或补写。
 - `/api/counterfactuals/submit` 会保存人生决策反事实锚点，追加 `COUNTERFACTUAL_ANCHOR_CREATED` 和 `CORE_MEMORY_UPDATED`；只有 main 分支会把锚点直接持久写入 `User.core_memory.persona_traits`。
@@ -218,7 +243,7 @@ http://localhost:8001/docs
 - Postgres 模式下启动会额外启用 `vector` extension，并创建 `rag_documents` 表及其 metadata/embedding 索引。
 - RAG 记忆现在写入 Postgres `rag_documents`，通过 user/agent/branch/topic 等 metadata 做隔离，不再依赖本地向量库目录。读取时 `main` 只读 main，非 main 分支会读 main 加当前分支，避免平行分支完全丢失主线记忆。
 - **架构黑科技 2：前端分页防爆机制已经上线。** Plaza、Chat、TimeMachine 三类可能无限增长的长列表都必须走 `skip`/`limit` 分页、`hasMore*` 状态和显式“加载更多”。保留 `PLAZA_PAGE_SIZE`、`CHAT_HISTORY_PAGE_SIZE`、`EVENT_PAGE_SIZE` 这类硬上限，不要回退成一次性拉取全部帖子、全部聊天或全部事件。
-- 后端列表接口也必须继续保留有界 `limit`：`/api/plaza/events`、`/api/posts`、`/api/agents/{agent_id}/chat`、`/api/agents/{agent_id}/events` 是长实验防爆边界。
+- 后端列表接口也必须继续保留有界 `limit`：`/api/plaza/events`、`/api/posts`、`/api/agents/{agent_id}/chat`、`/api/agents/{agent_id}/events`、`/api/social/contacts`、`/api/social/messages/{contact_id}`、`/api/social/groups`、`/api/social/groups/{group_id}/messages` 是长实验防爆边界。
 - `/api/admin/purge-branch` 是破坏性维护接口，只允许清理非 `main` 分支。它会删除该分支相关事件、帖子、聊天和纠错记录，并临时移除再恢复 `event_logs_no_delete` trigger。
 
 ## 修改后端前必须知道的实现现状
@@ -233,6 +258,14 @@ http://localhost:8001/docs
 - `post_crud.create_post()` 和 `feedback_crud.create_feedback_log()` 都会同步追加 `EventLog`，分支广场显示是靠这些事件重建出来的。
 - 广场纠错是“投影覆盖”而不是“原地修改”：`FeedbackLog`/`FEEDBACK_CREATED` 记录保存改写结果，渲染 feed 时按分支找到最新纠错文本覆盖展示，`posts` 表原始内容仍保留。
 - `chat_crud.create_chat_log()` 保存聊天后还会追加带 `session_id`、`topic` 和 `experiment_mode` 的 `MESSAGE_RECEIVED` 事件；聊天历史页面读的是按分支/会话/话题过滤的有界 `ChatLog` 切片。
+- `create_human_to_human_chat_log()` 会追加 `HUMAN_MESSAGE_RECEIVED`；`create_group_message_log()` 会追加 `GROUP_MESSAGE_RECEIVED`。这些记录都复用 `ChatLog`，所以只想读 Agent 私聊时必须过滤 `session_type`。
+- 真人社交列表读取使用 `get_branch_read_windows()` 和 `branch_window_filter()`，fork 分支可以看到合适的主线历史，但不会把所有分支消息粗暴混在一起。
+- `/api/social/events` 是前端实时通知主路径。`frontend/dev-server.mjs` 专门代理这个 SSE 长连接到 `BACKEND_ORIGIN`（默认 `http://127.0.0.1:8001`），因为普通 Next dev rewrite 对长连接不够可靠。
+- `social_realtime.py` 会把通知推到本进程 SSE 队列；如果配置了 `LOOP_REDIS_URL`，还会用 Redis pub/sub 跨 worker fanout 并做近期事件去重。没有 Redis 时，多 worker 间实时同步会退化成本 worker 可见。
+- 真人 1v1 和真人群聊每累计 20 条未处理的用户本人消息，会触发旁路 memory watcher；main 分支洞察直接合并 `User.core_memory`，非 main 分支写成分支 `CORE_MEMORY_UPDATED` 事件。
+- `Group` CRUD 强制 Boundary 1：`HUMAN_ONLY` 拒绝 Agent 成员，`AGENT_ONLY` 拒绝 User 成员。管理员工具也不能绕开这个不变量。
+- `POST /api/simulate/groups/{group_id}/tick` 每次只推进一个 `AGENT_ONLY` 群的一个 Agent 发言回合，并使用进程锁 + Postgres advisory lock 防重复。
+- `POST /api/simulate/debate` 运行监督式 LangGraph 辩论；发言写成 `GROUP_MESSAGE_RECEIVED` 事件，最终主持人报告写成 `DEBATE_CONCLUDED`。这条路径目前不会为每条辩论发言创建 `ChatLog` 行。
 - 私聊存储成功后，`extract_and_update_memory_background()` 还会在后台尝试从最新一轮对话里抽 durable 身份事实，并通过 `merge_core_memory_insight()` 写回 core memory。
 - `/api/chat/{agent_id}/sessions` 会按某个分支下的 `session_id` 汇总聊天会话，供聊天页侧边栏显示。
 - `DRIFT_DETECTED` 只在 `evaluate_drift_zero_shot()` 返回 `is_drifting=true` 后写入；模型不可用或跳过时不阻塞聊天保存。
@@ -245,7 +278,7 @@ http://localhost:8001/docs
 - `POST /api/simulation/fork` 现在支持传入 `source_branch_id` 和可选的 `source_event_id`，会校验事件是否属于该分支血统链，从源分支重建状态，并把 `from_branch_id` / `parent_event_id` 写进 fork payload 方便追溯。
 - `POST /api/agents/{agent_id}/import_chat` 现在是管理员接口，会校验每个 sender Agent id，按请求里的 `branch_id` 和可选批次级 `topic` 写入 target-agent-perspective pgvector 记忆，并调用 `sync_group_chat_memory_access()` 让参与群聊的 Agent 都能检索共享上下文。
 - `DELETE /api/agents/{agent_id}` 会硬删除该 Agent 的事件、聊天、帖子、纠错、关系、反思、评估和 pgvector 记忆；如果删的是 NPC Agent，还会把背后的系统 user 一并删掉。
-- 用户侧的记忆上传/搜索接口仍没有暴露分支参数，所以手工上传/搜索基本仍是主世界线视角；分支化向量上下文主要来自聊天抽取、群聊导入 metadata 和 `rag_service` 的 Git-style 过滤。
+- 用户侧的记忆上传/搜索接口现在暴露 `branch_id`，仍然通过 pgvector metadata 和 `rag_service` 的 Git-style 分支过滤来读写，不依赖本地向量库目录。
 - `extract_and_update_memory_background()` 可以把私聊抽取成带 branch metadata 的 RAG chunk，但只有 main 分支会把 durable 身份事实真正写回 `User.core_memory`；非 main 身份差异主要靠分支事件和 TimeMachine 重建表达。
 - 关系加权的“个性化广场”逻辑已经落在 `post_crud.get_posts_for_viewer()` 和 `/api/agents/*/feed-preview` 两处，不要无意中把它们全部回退成纯时间倒序。
 
@@ -274,6 +307,11 @@ http://localhost:8001/docs
 - `backend/app/services/access_control.py`：Agent-scoped probe/counterfactual 工作流的 owner/admin 权限解析。
 - `backend/app/services/consolidation_service.py`：过去 24 小时记录收集、睡眠式巩固、关系更新、episodic memory 写入、working memory 清空。
 - `backend/app/services/feedback_service.py`：帖子纠错后的反思与合并路径。
+- `backend/app/services/rolling_summary.py`：群聊滚动摘要，按分支保存压缩上下文，避免长群聊 prompt 爆炸。
+- `backend/app/services/speaker_manager.py`：`AGENT_ONLY` 群组的单回合发言者选择、发言生成和锁保护。
+- `backend/app/services/debate_graph.py`：监督式多 Agent 辩论图、主持人路由、记忆检索和总结事件写入。
+- `backend/app/services/social_realtime.py`：社交消息 SSE 通知 hub，可选 Redis pub/sub 跨 worker。
+- `backend/app/services/ws_manager.py`：`/api/ws/social` 保留使用的轻量 WebSocket 连接管理。
 
 ## 事件类型速记
 
@@ -285,6 +323,9 @@ http://localhost:8001/docs
 - `POST_CREATED`：广场新帖。
 - `FEEDBACK_CREATED`：用户对帖子提交纠错，feed 投影可能因此显示改写文本。
 - `MESSAGE_RECEIVED`：一次私聊 turn 已保存。
+- `HUMAN_MESSAGE_RECEIVED`：一次真人 1v1 社交消息已保存。
+- `GROUP_MESSAGE_RECEIVED`：真人群聊、Agent-only 群聊回合或辩论式群消息已记录。
+- `DEBATE_CONCLUDED`：监督式辩论图结束并写入主持人总结。
 - `DRIFT_DETECTED`：zero-shot 评估器认为某个分支/会话的近期回复出现身份漂移。
 - `CORE_MEMORY_UPDATED`：长期身份记忆发生变化，来源可能是工具调用或睡眠巩固。
 - `COUNTERFACTUAL_ANCHOR_CREATED`：用户提交了人生决策反事实锚点，后续会进入 durable identity memory。
@@ -325,6 +366,16 @@ http://localhost:8001/docs
   -> sleep consolidation 和 feedback reflection 继续沉淀高层反思与关系分数
 ```
 
+真人社交 / 群聊链路：
+
+```text
+真人 1v1 / 真人群聊 / Agent-only 群组仿真
+  -> ChatLog 写入 session_type + branch_id + sender/receiver/group metadata
+  -> EventLog 追加 HUMAN_MESSAGE_RECEIVED 或 GROUP_MESSAGE_RECEIVED
+  -> SSE/Redis fanout 在可用时推送实时通知
+  -> 旁路 memory watcher 或 rolling summary 压缩高频社交上下文
+```
+
 Probe 与反事实身份锚点链路：
 
 ```text
@@ -360,6 +411,7 @@ TimeMachine 在某个 EventLog 时间点重建 Agent 状态
 POST /api/users/register
 POST /api/users/login
 GET  /api/users/me
+GET  /api/users/directory
 POST /api/users/npc-agents/from-senders            管理员 bearer
 POST /api/users/me/questionnaire
 POST /api/users/{user_id}/questionnaire
@@ -367,6 +419,7 @@ GET  /api/users/me/agent
 GET  /api/users/{user_id}/agent
 GET  /api/users/agent-choices                     管理员 bearer
 POST /api/users/agent-choices/{agent_id}/session  管理员 bearer
+GET  /api/agents/directory                        管理员 bearer
 DELETE /api/agents/{agent_id}                     owner/admin bearer，破坏性
 ```
 
@@ -388,6 +441,24 @@ GET  /api/agents/{agent_id}/chat
 POST /api/agents/{agent_id}/chat
 GET  /api/chat/{agent_id}/sessions
 POST /api/chat/{agent_id}/check-drift
+```
+
+真人社交与群组：
+
+```text
+POST /api/groups
+POST /api/groups/{group_id}/members
+POST /api/groups/{group_id}/messages
+GET  /api/social/events                           bearer token query，SSE
+GET  /api/social/contacts
+GET  /api/social/messages/{contact_id}
+POST /api/social/messages/{contact_id}/read
+POST /api/social/messages
+POST /api/social/groups
+GET  /api/social/groups
+GET  /api/social/groups/{group_id}/messages
+POST /api/social/groups/{group_id}/messages
+WS   /api/ws/social                               bearer token query
 ```
 
 盲测评估：
@@ -432,6 +503,8 @@ GET  /api/agents/{agent_id}/feed-preview
 ```text
 POST /api/simulate/user/{username}/post   管理员 bearer 或机器 key
 POST /api/simulate/agent/{agent_id}/post  管理员 bearer 或机器 key
+POST /api/simulate/debate                 管理员 bearer 或机器 key
+POST /api/simulate/groups/{group_id}/tick 管理员 bearer 或机器 key
 POST /api/simulate/tick                   管理员 bearer 或机器 key
 GET  /api/agents/{agent_id}/events
 GET  /api/simulation/settings
@@ -488,6 +561,9 @@ LOOP_DRIFT_JUDGE_THINKING=disabled
 LOOP_DRIFT_JUDGE_REASONING_EFFORT=high
 LOOP_CONSOLIDATION_LLM_TIMEOUT_SECONDS=60
 LOOP_CONSOLIDATION_LLM_MAX_RETRIES=0
+LOOP_DEBATE_MODEL=deepseek-chat
+LOOP_DEBATE_LLM_TIMEOUT_SECONDS=25
+LOOP_DEBATE_MAX_TOKENS=900
 LOOP_ADMIN_API_KEY=choose_a_private_admin_key
 LOOP_ADMIN_USERNAME=loop_research_admin
 LOOP_ADMIN_PASSWORD=choose_a_private_admin_password
@@ -516,13 +592,16 @@ BASIC_AUTH_SESSION_SECONDS=43200
 
 私聊实验模式使用中性标签：`mode_alpha` 表示完整 active-memory/IACL 路径，`mode_beta` 表示静态 prompt 基线。旧别名 `full_iacl` 和 `static_prompt` 会在后端归一化到这两个标签。
 
+Agent-only 群组单回合发言使用 `DEEPSEEK_CHAT_MODEL` 和普通聊天 thinking 设置；监督式辩论优先使用 `LOOP_DEBATE_MODEL`、`LOOP_DEBATE_LLM_TIMEOUT_SECONDS`、`LOOP_DEBATE_MAX_TOKENS`，未配置时回退到 `DEEPSEEK_CHAT_MODEL`。
+
 ## 前端技术栈
 
 - Next.js 14 App Router
 - React 18
 - TypeScript 5
 - Tailwind CSS 3
-- Next.js rewrites：浏览器访问前端同源 `/api/*`，由 Next.js 服务端转发到 FastAPI。
+- Next.js rewrites：浏览器访问前端同源 `/api/*`，由 Next.js 服务端转发到 FastAPI。当前 `next.config.mjs` 的 REST rewrite 目标硬编码为 `http://127.0.0.1:8001/api/:path*`，后端端口变更时要同步改。
+- 自定义 `frontend/dev-server.mjs`：包装 Next dev，并单独代理 `/api/social/events` 到 `BACKEND_ORIGIN`（默认 `http://127.0.0.1:8001`），用于保持 SSE 长连接稳定。
 - Next.js middleware：在进入应用页面前做站点级访问验证。
 - Route Handler：`src/app/site-auth/login/route.ts` 处理站点登录并设置 HTTP-only cookie。
 - 前端中英双语：`AppProviders` 注入 `LanguageProvider`，`LanguageToggle` 切换语言，文案集中在 `src/locales/dictionary.ts`，选择保存在 `loop_ui_language`。
@@ -541,9 +620,11 @@ NEXT_PUBLIC_API_BASE_URL=
 BACKEND_INTERNAL_API_BASE_URL=http://127.0.0.1:8001
 ```
 
-保持 `NEXT_PUBLIC_API_BASE_URL` 为空，浏览器就会请求当前前端 origin 的 `/api/...`。`next.config.mjs` 再把 `/api/:path*` rewrite 到 `BACKEND_INTERNAL_API_BASE_URL`，这样用户电脑只需要通过 SSH tunnel 访问 `localhost:3000`，不需要浏览器直连远程服务器的 8001。
+保持 `NEXT_PUBLIC_API_BASE_URL` 为空，浏览器就会请求当前前端 origin 的 `/api/...`。当前 `next.config.mjs` 会把 REST `/api/:path*` rewrite 到 `http://127.0.0.1:8001/api/:path*`；`dev-server.mjs` 另用 `BACKEND_ORIGIN` 代理 `/api/social/events` SSE。这样用户电脑只需要通过 SSH tunnel 访问 `localhost:3000`，不需要浏览器直连远程服务器的 8001。
 
 注意：当前 rewrite 只覆盖 `/api/*`，不覆盖 `/health`。`/lab` 的健康检查按钮现在调用 `apiRequest("/health")`；在同源代理模式下需要临时设置 `NEXT_PUBLIC_API_BASE_URL` 指向后端，或后续给 Next.js 增加 `/health` rewrite。
+
+修改 `frontend/.env.local`、`frontend/dev-server.mjs` 或 `frontend/next.config.mjs` 后都要重启 Next.js dev server。
 
 另一个容易漏掉的点：后端 CORS 中间件当前允许 `GET`、`POST`、`DELETE`、`OPTIONS`。`PATCH /api/simulation/settings` 在 Next.js 同源代理下可用；如果让浏览器直接跨源访问 FastAPI，需要同步补上 `PATCH` CORS method。
 
@@ -608,6 +689,36 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 - `mode_alpha` 回复后会触发漂移检测；如果发现核心人格漂移，页面会要求用户填写“不像我在哪里”和“真实我会怎么说”，再发起强制校准。
 
 后端 `mode_alpha` 聊天会结合身份 prompt、core memory、RAG 检索结果、最近会话历史、当前分支重建状态，并把新聊天写入 `ChatLog` 和 `EventLog`。`mode_beta` 只使用初始问卷人格摘要，不使用 RAG、工具、历史或自我更新记忆。
+
+### `/social` 真人社交空间
+
+文件：`frontend/src/app/social/page.tsx`、`frontend/src/components/social/H2HChatPanel.tsx`、`frontend/src/components/social/HumanGroupPanel.tsx`
+
+这是分支感知的真人参与者社交页面。
+
+主要功能：
+
+- 读取 `/api/simulation/settings`；管理员可切换分支，普通用户遵守 `global_active_branch` / `allow_user_branch_switch`。
+- 真人 1v1：`GET /api/social/contacts` 加载通讯录和未读数，`GET /api/social/messages/{contact_id}` 分页加载历史，`POST /api/social/messages` 发送，`POST /api/social/messages/{contact_id}/read` 标记已读。
+- 真人群聊：`POST /api/social/groups` 创建 `HUMAN_ONLY` 群，`GET /api/social/groups` 分页列出群，`GET/POST /api/social/groups/{group_id}/messages` 读写群消息。
+- 实时通知：前端用 `EventSource` 连接 `/api/social/events?token=...`；开发服务器会专门代理该 SSE 长连接。
+- UI 会做 optimistic pending message 合并，但最终仍以 REST 持久化后的 `ChatLog` 为准。
+- 这些真人消息会进入 `ChatLog` 和 `EventLog`，并可能触发旁路 memory watcher，把真实社交中的稳定表达风格沉淀成身份记忆。
+
+### `/sandbox` 推演沙盘
+
+文件：`frontend/src/app/sandbox/page.tsx`、`frontend/src/components/sandbox/DebatePanel.tsx`、`frontend/src/components/sandbox/GroupSimulationPanel.tsx`
+
+这是管理员专用的仿真工作台，非管理员会被重定向。
+
+主要功能：
+
+- 加载分支列表并选择目标分支。
+- 通过 `/api/agents/directory` 选择 Agent。
+- 触发监督式多 Agent 辩论：`POST /api/simulate/debate`，返回已执行回合数、是否达成共识和 final report。
+- 创建 Boundary-1 群组：`POST /api/groups`，可选 `HUMAN_ONLY` 或 `AGENT_ONLY`。
+- 添加群成员：`POST /api/groups/{group_id}/members`，由后端校验 `USER` / `AGENT` 是否符合群类型。
+- 手动推进 Agent-only 群组一个发言回合：`POST /api/simulate/groups/{group_id}/tick`。
 
 ### `/probes` 每周验证问卷
 
@@ -679,7 +790,7 @@ ssh -L 3000:127.0.0.1:3000 -L 8001:127.0.0.1:8001 zhr@服务器的IP
 
 - 上传长文本记忆：`POST /api/users/me/memory/upload`
 - 语义搜索记忆：`POST /api/users/me/memory/search`
-- 读取全局分支设置；分支选择影响 working memory/core memory 重建，手工上传/搜索仍主要是 main-scope 用户记忆。
+- 读取全局分支设置；分支选择会进入上传/搜索 payload，也影响 working memory/core memory 重建。
 - 触发睡眠巩固：`POST /api/agents/me/sleep`
 - 查看短期工作记忆：`GET /api/agents/me/memory/state`
 - 清空短期工作记忆：`POST /api/agents/me/memory/clear`
@@ -791,13 +902,15 @@ BASIC_AUTH_SESSION_SECONDS=43200
 11. 对自己的 Agent 帖子提交纠错。
 12. 进入 `/chat`，发送消息，确认 Agent 回复并保存历史。
 13. 在 `/chat` 新建一个会话，切换 `mode_alpha` / `mode_beta`，确认历史按会话隔离。
-14. 进入 `/probes`，提交当前 IPIP/PVQ probe，确认 Agent 画像仍可加载。
-15. 进入 `/counterfactuals`，提交一条人生反事实锚点，确认 memory 诊断中 core memory 有更新。
-16. 用新浏览器上下文打开 `/evaluations/{agent_id}`，提交一次盲测评分。
-17. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
-18. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
-19. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
-20. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
+14. 进入 `/social`，发送一条真人 1v1 消息，再创建一个真人群聊并发送群消息，刷新后确认消息仍在。
+15. 使用管理员进入 `/sandbox`，运行一次小规模多 Agent 辩论，或创建 `AGENT_ONLY` 群并手动 tick 一个发言回合。
+16. 进入 `/probes`，提交当前 IPIP/PVQ probe，确认 Agent 画像仍可加载。
+17. 进入 `/counterfactuals`，提交一条人生反事实锚点，确认 memory 诊断中 core memory 有更新。
+18. 用新浏览器上下文打开 `/evaluations/{agent_id}`，提交一次盲测评分。
+19. 进入 `/memory`，上传记忆、搜索记忆、触发睡眠巩固、查看诊断。
+20. 进入 `/time-machine`，加载事件，选择一个事件 fork 新分支。
+21. 回到 `/plaza` 或 `/chat`，切换到新分支观察差异。
+22. 在 `/lab` 导出 chatlogs 或 feedbacks JSONL。
 
 ## 常用验证命令
 
@@ -827,9 +940,9 @@ make proxy-check
 
 ## 常见问题排查
 
-- 注册失败：先检查 `/health`，再检查 `frontend/.env.local` 的 `BACKEND_INTERNAL_API_BASE_URL`。
+- 注册失败：先检查 `/health`，再检查 `frontend/next.config.mjs` 的 REST rewrite 目标、`frontend/dev-server.mjs` 的 `BACKEND_ORIGIN` 默认值，以及 `frontend/.env.local` 的 `NEXT_PUBLIC_API_BASE_URL` 是否为空。
 - 浏览器 CORS 报错：检查根目录 `.env` 的 `BACKEND_CORS_ORIGINS` 是否包含浏览器实际访问的 origin。
-- `/api/*` 代理失败：修改 `frontend/.env.local` 或 `next.config.mjs` 后需要重启 Next.js。
+- `/api/*` 代理失败：修改 `frontend/.env.local`、`frontend/next.config.mjs` 或 `frontend/dev-server.mjs` 后需要重启 Next.js。
 - 管理员功能 403：先确认当前 `loop_session` 是否来自 `LOOP_ADMIN_USERNAME` / `LOOP_ADMIN_PASSWORD` 配置的管理员账号；simulation/purge 这类机器接口再检查 `X-Loop-Admin-Key` 和 `LOOP_ADMIN_API_KEY`。
 - 自动仿真发帖 500：现在通常表示 DeepSeek key、模型、网络或超时配置有问题；不会静默降级为 Mock。
 - 站点访问一直跳登录：检查 `BASIC_AUTH_*` 环境变量和 cookie secret 是否稳定。

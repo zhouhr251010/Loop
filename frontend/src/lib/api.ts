@@ -199,6 +199,139 @@ export type NpcAgentSenderSeedResult = AgentSessionChoice & {
   sender_id: string;
 };
 
+export type DebateTriggerPayload = {
+  topic: string;
+  participant_agent_ids: string[];
+  branch_id: string;
+  max_turns?: number;
+};
+
+export type DebateTriggerResponse = {
+  status: string;
+  turns_executed: number;
+  consensus_reached: boolean;
+  final_report: Record<string, unknown> | string;
+};
+
+export type GroupType = "AGENT_ONLY" | "HUMAN_ONLY";
+
+export type GroupEntityType = "AGENT" | "USER";
+
+export type GroupCreatePayload = {
+  name: string;
+  topic?: string;
+  group_type: GroupType | string;
+};
+
+export type GroupResponse = {
+  id: string;
+  name: string;
+  topic?: string | null;
+  group_type: string;
+};
+
+export type GroupMemberPayload = {
+  entity_id: string;
+  entity_type: GroupEntityType | string;
+};
+
+export type GroupMemberResponse = {
+  id: number;
+  group_id: string;
+  entity_id: string;
+  entity_type: string;
+  role: string;
+};
+
+export type GroupTickResponse = {
+  status?: string;
+  group_id?: string;
+  branch_id?: string;
+  current_speaker?: string;
+  speaker_agent_id?: string | number;
+  content?: string;
+  message?: string;
+  [key: string]: unknown;
+};
+
+export type HumanGroupMessagePayload = {
+  content: string;
+  branch_id: string;
+};
+
+export type HumanGroupMessageResponse = {
+  id: number;
+  group_id: string;
+  sender_user_id: number;
+  content: string;
+  branch_id: string;
+  session_type: string;
+  timestamp: string;
+};
+
+export type UserDirectoryEntry = {
+  user_id: string;
+  username: string;
+  unread_count?: number;
+};
+
+export type SocialMessage = {
+  id: number;
+  sender_id: number;
+  receiver_id?: number | null;
+  sender_username: string;
+  receiver_username?: string | null;
+  group_id?: string | null;
+  content: string;
+  timestamp: string;
+  is_read: boolean;
+  branch_id: string;
+  session_id: string;
+  topic: string;
+  session_type: string;
+};
+
+export type SocialGroup = {
+  id: string;
+  name: string;
+  owner_id?: number | null;
+  member_count: number;
+  member_ids: number[];
+  latest_message?: string | null;
+  latest_timestamp?: string | null;
+};
+
+export type SocialMessagePayload = {
+  receiver_user_id: number;
+  content: string;
+  branch_id: string;
+  session_id?: string;
+  topic?: string;
+};
+
+export type SocialGroupCreatePayload = {
+  contact_ids: number[];
+  name?: string;
+};
+
+export type SocialGroupMessagePayload = {
+  content: string;
+  branch_id: string;
+  topic?: string;
+};
+
+export type SocialListParams = {
+  q?: string;
+  skip?: number;
+  limit?: number;
+  branchId?: string;
+};
+
+export type AgentDirectoryEntry = {
+  agent_id: string;
+  name: string;
+};
+
 export function formatAgentName(agent: Pick<Agent, "agent_name" | "is_npc">) {
   return agent.is_npc ? `${agent.agent_name} [NPC]` : agent.agent_name;
 }
@@ -240,4 +373,153 @@ export async function apiRequest<T>(
   }
 
   return response.json() as Promise<T>;
+}
+
+export function triggerDebate(payload: DebateTriggerPayload) {
+  return apiRequest<DebateTriggerResponse>("/api/simulate/debate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createGroup(payload: GroupCreatePayload) {
+  return apiRequest<GroupResponse>("/api/groups", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function addGroupMember(groupId: string, payload: GroupMemberPayload) {
+  return apiRequest<GroupMemberResponse>(
+    `/api/groups/${encodeURIComponent(groupId)}/members`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function triggerGroupTick(groupId: string, branchId: string) {
+  return apiRequest<GroupTickResponse>(
+    `/api/simulate/groups/${encodeURIComponent(
+      groupId,
+    )}/tick?branch_id=${encodeURIComponent(branchId)}`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export function sendHumanGroupMessage(
+  groupId: string,
+  payload: HumanGroupMessagePayload,
+) {
+  return apiRequest<HumanGroupMessageResponse>(
+    `/api/groups/${encodeURIComponent(groupId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+function buildSocialListQuery(params: SocialListParams = {}) {
+  const searchParams = new URLSearchParams();
+  if (params.q?.trim()) {
+    searchParams.set("q", params.q.trim());
+  }
+  if (typeof params.skip === "number") {
+    searchParams.set("skip", String(params.skip));
+  }
+  if (typeof params.limit === "number") {
+    searchParams.set("limit", String(params.limit));
+  }
+  if (params.branchId?.trim()) {
+    searchParams.set("branch_id", params.branchId.trim());
+  }
+  const queryString = searchParams.toString();
+  return queryString ? `?${queryString}` : "";
+}
+
+export function getUsersDirectory(params: SocialListParams = {}) {
+  return apiRequest<UserDirectoryEntry[]>(
+    `/api/social/contacts${buildSocialListQuery(params)}`,
+  );
+}
+
+export function getSocialMessages(
+  contactId: string | number,
+  branchId: string,
+  skip = 0,
+  limit = 50,
+) {
+  return apiRequest<SocialMessage[]>(
+    `/api/social/messages/${encodeURIComponent(
+      String(contactId),
+    )}?branch_id=${encodeURIComponent(branchId)}&skip=${skip}&limit=${limit}`,
+  );
+}
+
+export function sendSocialMessage(payload: SocialMessagePayload) {
+  return apiRequest<SocialMessage>("/api/social/messages", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function markSocialMessagesRead(
+  contactId: string | number,
+  branchId = "main",
+) {
+  return apiRequest<{ ok: boolean; updated_count: number }>(
+    `/api/social/messages/${encodeURIComponent(
+      String(contactId),
+    )}/read?branch_id=${encodeURIComponent(branchId)}`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export function getSocialGroups(params: SocialListParams = {}) {
+  return apiRequest<SocialGroup[]>(
+    `/api/social/groups${buildSocialListQuery(params)}`,
+  );
+}
+
+export function createSocialGroup(payload: SocialGroupCreatePayload) {
+  return apiRequest<SocialGroup>("/api/social/groups", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getSocialGroupMessages(
+  groupId: string,
+  branchId: string,
+  skip = 0,
+  limit = 50,
+) {
+  return apiRequest<SocialMessage[]>(
+    `/api/social/groups/${encodeURIComponent(
+      groupId,
+    )}/messages?branch_id=${encodeURIComponent(branchId)}&skip=${skip}&limit=${limit}`,
+  );
+}
+
+export function sendSocialGroupMessage(
+  groupId: string,
+  payload: SocialGroupMessagePayload,
+) {
+  return apiRequest<SocialMessage>(
+    `/api/social/groups/${encodeURIComponent(groupId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function getAgentsDirectory() {
+  return apiRequest<AgentDirectoryEntry[]>("/api/agents/directory");
 }

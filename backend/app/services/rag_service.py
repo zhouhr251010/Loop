@@ -17,7 +17,12 @@ from sqlalchemy import text
 
 from app.database import IS_POSTGRES, SessionLocal
 from app.security import RedisError, get_async_redis_client
-from app.services.branching import DEFAULT_BRANCH_ID, coerce_timestamp, normalize_branch_id
+from app.services.branching import (
+    DEFAULT_BRANCH_ID,
+    coerce_timestamp,
+    get_branch_read_windows,
+    normalize_branch_id,
+)
 from app.services.infinity_client import get_infinity_client
 
 
@@ -243,21 +248,30 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(f"{float(value):.12g}" for value in embedding) + "]"
 
 
-def _branch_filter_sql() -> str:
-    """SQL fragment for Git-style branch inheritance in RAG reads."""
-    return """
-      AND (
-        (
-          :branch_id = :main_branch_id
-          AND COALESCE(metadata ->> 'branch_id', :main_branch_id) = :main_branch_id
+def _branch_filter_sql(
+    windows: list[Any],
+) -> tuple[str, dict[str, Any]]:
+    """SQL fragment for fork-point-safe branch inheritance in RAG reads."""
+    clauses: list[str] = []
+    params: dict[str, Any] = {"main_branch_id": DEFAULT_BRANCH_ID}
+    for index, window in enumerate(windows):
+        branch_param = f"branch_window_{index}"
+        params[branch_param] = window.branch_id
+        clause = (
+            "COALESCE(metadata ->> 'branch_id', :main_branch_id) "
+            f"= :{branch_param}"
         )
-        OR (
-          :branch_id <> :main_branch_id
-          AND COALESCE(metadata ->> 'branch_id', :main_branch_id)
-              IN (:main_branch_id, :branch_id)
-        )
-      )
-    """
+        if window.until_timestamp is not None:
+            until_param = f"branch_until_{index}"
+            params[until_param] = window.until_timestamp
+            clause = f"({clause} AND created_at <= :{until_param})"
+        else:
+            clause = f"({clause})"
+        clauses.append(clause)
+
+    if not clauses:
+        return "AND FALSE", params
+    return "AND (" + " OR ".join(clauses) + ")", params
 
 
 def _document_from_row(row: Any) -> MemoryDocument | None:
@@ -351,6 +365,9 @@ def _recall_documents_sync(
     participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
     normalized_branch_id = normalize_branch_id(branch_id)
     with SessionLocal() as db:
+        branch_sql, branch_params = _branch_filter_sql(
+            get_branch_read_windows(db, normalized_branch_id),
+        )
         rows = db.execute(
             text(
                 f"""
@@ -362,7 +379,7 @@ def _recall_documents_sync(
                     embedding <=> CAST(:query_embedding AS vector) AS distance
                 FROM rag_documents
                 WHERE embedding IS NOT NULL
-                  {_branch_filter_sql()}
+                  {branch_sql}
                   AND (
                     (
                       metadata ? 'user_id'
@@ -386,12 +403,11 @@ def _recall_documents_sync(
             ),
             {
                 "query_embedding": _vector_literal(query_embedding),
-                "branch_id": normalized_branch_id,
-                "main_branch_id": DEFAULT_BRANCH_ID,
                 "user_id": user_id,
                 "agent_id": agent_id,
                 "participant_agent_ids": participant_agent_ids,
                 "limit": limit,
+                **branch_params,
             },
         ).all()
     documents = [
@@ -413,6 +429,9 @@ def _read_recent_documents_sync(
     participant_agent_ids = json.dumps([agent_id], ensure_ascii=False)
     normalized_branch_id = normalize_branch_id(branch_id)
     with SessionLocal() as db:
+        branch_sql, branch_params = _branch_filter_sql(
+            get_branch_read_windows(db, normalized_branch_id),
+        )
         rows = db.execute(
             text(
                 f"""
@@ -424,7 +443,7 @@ def _read_recent_documents_sync(
                     NULL AS distance
                 FROM rag_documents
                 WHERE TRUE
-                  {_branch_filter_sql()}
+                  {branch_sql}
                   AND (
                     (
                       metadata ? 'user_id'
@@ -447,12 +466,11 @@ def _read_recent_documents_sync(
                 """,
             ),
             {
-                "branch_id": normalized_branch_id,
-                "main_branch_id": DEFAULT_BRANCH_ID,
                 "user_id": user_id,
                 "agent_id": agent_id,
                 "participant_agent_ids": participant_agent_ids,
                 "limit": limit,
+                **branch_params,
             },
         ).all()
     return [

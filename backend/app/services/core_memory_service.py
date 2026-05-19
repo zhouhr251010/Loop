@@ -123,13 +123,16 @@ def merge_core_memory_insight(
     branch_id: str = "main",
     source: str = "sleep_consolidation",
     persist_user_core_memory: bool = True,
+    base_core_memory: Any | None = None,
 ) -> dict[str, str]:
     """Append a high-level reflection into persona core memory."""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
         raise ValueError("User not found.")
 
-    core_memory = normalize_core_memory(user.core_memory)
+    core_memory = normalize_core_memory(
+        base_core_memory if base_core_memory is not None else user.core_memory,
+    )
     clean_insight = (insight or "").strip()
     if not clean_insight:
         return core_memory

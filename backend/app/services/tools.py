@@ -11,9 +11,13 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
-from app.crud import agent as agent_crud
-from app.crud import post as post_crud
+from app import models
 from app.database import SessionLocal
+from app.services.branching import (
+    branch_window_filter,
+    get_branch_read_windows,
+    normalize_branch_id,
+)
 from app.services.core_memory_service import edit_user_core_memory
 from app.services.rag_service import retrieve_hybrid_memory
 
@@ -27,20 +31,30 @@ _current_tool_agent_id: ContextVar[int | None] = ContextVar(
     "current_tool_agent_id",
     default=None,
 )
+_current_tool_branch_id: ContextVar[str] = ContextVar(
+    "current_tool_branch_id",
+    default="main",
+)
 
 
-def set_tool_user_context(user_id: int | None, agent_id: int | None = None):
+def set_tool_user_context(
+    user_id: int | None,
+    agent_id: int | None = None,
+    branch_id: str = "main",
+):
     """Set the user context used by user-scoped tools during one graph run."""
     user_token = _current_tool_user_id.set(user_id)
     agent_token = _current_tool_agent_id.set(agent_id)
-    return user_token, agent_token
+    branch_token = _current_tool_branch_id.set(normalize_branch_id(branch_id))
+    return user_token, agent_token, branch_token
 
 
 def reset_tool_user_context(token) -> None:
     """Reset the user context after a graph run finishes."""
-    user_token, agent_token = token
+    user_token, agent_token, branch_token = token
     _current_tool_user_id.reset(user_token)
     _current_tool_agent_id.reset(agent_token)
+    _current_tool_branch_id.reset(branch_token)
 
 
 def _get_config_user_id(config: RunnableConfig | None) -> int | None:
@@ -61,37 +75,62 @@ def _get_config_agent_id(config: RunnableConfig | None) -> int | None:
     return agent_id if isinstance(agent_id, int) else None
 
 
+def _get_config_branch_id(config: RunnableConfig | None) -> str | None:
+    if not config:
+        return None
+
+    configurable = config.get("configurable") or {}
+    branch_id = configurable.get("branch_id")
+    return normalize_branch_id(branch_id) if isinstance(branch_id, str) else None
+
+
 @tool
 def read_plaza_feed() -> str:
     """Read the latest five public plaza posts from the simulation feed."""
-    user_id = _current_tool_user_id.get()
+    branch_id = normalize_branch_id(_current_tool_branch_id.get())
     db = SessionLocal()
     try:
-        viewer_agent = (
-            agent_crud.get_agent_by_user_id(db, user_id)
-            if user_id is not None
-            else None
+        events = (
+            db.query(models.EventLog)
+            .filter(
+                models.EventLog.event_type == "POST_CREATED",
+                branch_window_filter(
+                    models.EventLog.branch_id,
+                    models.EventLog.timestamp,
+                    models.EventLog.event_id,
+                    get_branch_read_windows(db, branch_id),
+                ),
+            )
+            .order_by(
+                models.EventLog.timestamp.desc(),
+                models.EventLog.event_id.desc(),
+            )
+            .limit(5)
+            .all()
         )
-        posts = (
-            post_crud.get_posts_for_viewer(db, viewer_agent.id, skip=0, limit=5)
-            if viewer_agent is not None
-            else post_crud.get_posts(db, skip=0, limit=5)
-        )
-        if not posts:
+        if not events:
             return "广场目前还没有帖子。"
 
         feed_lines: list[str] = []
-        for index, post in enumerate(posts, start=1):
-            agent_name = getattr(post.agent, "agent_name", "Unknown Agent")
+        for index, event in enumerate(events, start=1):
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            agent_name = getattr(event.agent, "agent_name", "Unknown Agent")
             timestamp = (
-                post.timestamp.isoformat(sep=" ")
-                if post.timestamp
+                event.timestamp.isoformat(sep=" ")
+                if event.timestamp
                 else "unknown time"
             )
+            content = str(payload.get("content") or "").strip()
+            if not content:
+                post_id = payload.get("post_id")
+                post = db.get(models.Post, post_id) if isinstance(post_id, int) else None
+                content = str(getattr(post, "content", "") or "").strip()
+            if not content:
+                continue
             feed_lines.append(
-                f"{index}. [{timestamp}] {agent_name}: {post.content}",
+                f"{index}. [{timestamp}] {agent_name}: {content}",
             )
-        return "\n".join(feed_lines)
+        return "\n".join(feed_lines) or "广场目前还没有帖子。"
     finally:
         db.close()
 
@@ -104,6 +143,7 @@ async def search_personal_memory(
     """Search this agent's user-scoped personal memory for relevant fragments."""
     user_id = _get_config_user_id(config) or _current_tool_user_id.get()
     agent_id = _get_config_agent_id(config) or _current_tool_agent_id.get()
+    branch_id = _get_config_branch_id(config) or _current_tool_branch_id.get()
     if user_id is None:
         return "当前没有可用的用户记忆上下文。"
 
@@ -112,6 +152,7 @@ async def search_personal_memory(
         query=query,
         top_k=3,
         agent_id=agent_id,
+        branch_id=branch_id,
     )
     if not memories:
         return "没有检索到相关的个人记忆。"
